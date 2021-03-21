@@ -2,9 +2,16 @@ package goyave
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"io/ioutil"
 	"net/http"
+	"reflect"
 	"regexp"
+	"runtime"
 	"strconv"
+	"strings"
 
 	"github.com/getkin/kin-openapi/openapi3"
 	"goyave.dev/goyave/v3/config"
@@ -13,6 +20,7 @@ import (
 
 var urlParamFormat = regexp.MustCompile(`{\w+(:.+?)?}`)
 
+// SaveOpenAPISpec PROTOTYPE function printing generated OpenAPI 3 spec to stdout
 func (r *Router) SaveOpenAPISpec() { // TODO how to call this?
 	spec := &openapi3.Swagger{
 		OpenAPI: "3.0.0",
@@ -34,11 +42,15 @@ func (r *Router) SaveOpenAPISpec() { // TODO how to call this?
 
 func convertRouter(r *Router, spec *openapi3.Swagger) {
 	for _, route := range r.routes {
+
+		desc := readDescription(route.handler)
+
 		for _, m := range route.methods {
 			if m == http.MethodHead || m == http.MethodOptions {
 				continue
 			}
 			op := openapi3.NewOperation()
+			op.Description = desc
 			op.Responses = openapi3.NewResponses()
 			// TODO handle OPTIONS response (with CORS)
 
@@ -256,4 +268,63 @@ func convertRule(r *validation.Rule, s *openapi3.Schema) {
 			s.MaxItems = &max
 		}
 	}
+}
+
+func readDescription(handler Handler) string {
+	pc := reflect.ValueOf(handler).Pointer()
+	handlerValue := runtime.FuncForPC(pc)
+	file, _ := handlerValue.FileLine(pc)
+	funcName := handlerValue.Name()
+
+	src, err := ioutil.ReadFile(file)
+	if err != nil {
+		panic(err)
+	}
+
+	fset := token.NewFileSet() // positions are relative to fset
+
+	f, err := parser.ParseFile(fset, file, src, parser.ParseComments)
+
+	if err != nil {
+		panic(err)
+	}
+
+	var doc *ast.CommentGroup
+
+	// TODO optimize, this re-inspects the whole file for each route. Maybe cache already inspected files
+	ast.Inspect(f, func(n ast.Node) bool { // TODO what would it do with closures and implementations?
+		// Example output of "funcName" value for controller: goyave.dev/goyave/v3/auth.(*JWTController).Login-fm
+		fn, ok := n.(*ast.FuncDecl)
+		if ok {
+			if fn.Name.IsExported() {
+				if fn.Recv != nil {
+					for _, f := range fn.Recv.List {
+						if expr, ok := f.Type.(*ast.StarExpr); ok {
+							if id, ok := expr.X.(*ast.Ident); ok {
+								strct := fmt.Sprintf("(*%s)", id.Name) // TODO handle expr without star (no ptr)
+								name := funcName[:len(funcName)-3]     // strip -fm
+								expectedName := strct + "." + fn.Name.Name
+								if name[len(name)-len(expectedName):] == expectedName {
+									doc = fn.Doc
+									return false
+								}
+							}
+						}
+					}
+				}
+				lastIndex := strings.LastIndex(funcName, ".")
+				if funcName[lastIndex+1:] == fn.Name.Name {
+					doc = fn.Doc
+					return false
+				}
+			}
+		}
+		return true
+	})
+
+	if doc != nil {
+		return doc.Text() // TODO extract only first sentence, or first paragraph
+	}
+
+	return ""
 }
