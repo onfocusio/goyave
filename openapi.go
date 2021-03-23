@@ -52,7 +52,7 @@ func makeServers() openapi3.Servers {
 func convertRouter(r *Router, spec *openapi3.Swagger) {
 	for _, route := range r.routes {
 
-		desc := readDescription(route.handler)
+		desc, annotations := readDescription(route.handler)
 
 		for _, m := range route.methods {
 			if m == http.MethodHead || m == http.MethodOptions {
@@ -60,7 +60,6 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 			}
 			op := openapi3.NewOperation()
 			op.Description = desc
-			op.Responses = openapi3.NewResponses()
 			// TODO handle OPTIONS response (with CORS)
 
 			if route.validationRules != nil {
@@ -124,6 +123,11 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 			} else {
 				op.Tags = []string{uri[1:]}
 			}
+			op.Responses = openapi3.Responses{}
+			processAnnotations(op, annotations)
+			if len(op.Responses) == 0 {
+				op.Responses["default"] = &openapi3.ResponseRef{Value: openapi3.NewResponse().WithDescription("")}
+			}
 			spec.AddOperation(uri, m, op)
 			path := spec.Paths[uri]
 			formats := urlParamFormat.FindAllStringSubmatch(route.GetFullURI(), -1)
@@ -152,6 +156,26 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 
 	for _, subrouter := range r.subrouters {
 		convertRouter(subrouter, spec)
+	}
+}
+
+func processAnnotations(op *openapi3.Operation, annotations []*annotation) {
+	for _, a := range annotations { // TODO better annotations architecture
+		switch a.Type {
+		case "Response":
+			params := strings.Split(a.Value, "\t")
+			r := responseAnnotation{
+				Name:        params[0],
+				Description: params[1],
+			}
+			op.Responses[r.Name] = &openapi3.ResponseRef{
+				Value: &openapi3.Response{
+					Description: &r.Description,
+				},
+			}
+		default:
+			fmt.Println("WARNING: unsupported annotation:", a.Type)
+		}
 	}
 }
 
@@ -285,7 +309,7 @@ func convertRule(r *validation.Rule, s *openapi3.Schema) {
 	}
 }
 
-func readDescription(handler Handler) string {
+func readDescription(handler Handler) (string, []*annotation) {
 	pc := reflect.ValueOf(handler).Pointer()
 	handlerValue := runtime.FuncForPC(pc)
 	file, _ := handlerValue.FileLine(pc)
@@ -338,8 +362,36 @@ func readDescription(handler Handler) string {
 	})
 
 	if doc != nil {
-		return doc.Text() // TODO extract only first sentence, or first paragraph
+		annotations := []*annotation{}
+		text := ""
+		for _, line := range strings.Split(doc.Text(), "\n") {
+			trimmed := strings.TrimSpace(line)
+			if len(trimmed) >= 1 && trimmed[0] == '@' {
+				i := strings.Index(trimmed, " ")
+				if i != -1 {
+					annotations = append(annotations, &annotation{
+						Type:  trimmed[1:i],
+						Value: strings.TrimSpace(trimmed[i:]),
+					})
+					continue
+				}
+			}
+			// FIXME only works with one-line
+
+			text += "\n" + line
+		}
+		return strings.TrimSpace(text), annotations
 	}
 
-	return ""
+	return "", []*annotation{}
+}
+
+type annotation struct {
+	Type  string
+	Value string
+}
+
+type responseAnnotation struct {
+	Name        string
+	Description string
 }
