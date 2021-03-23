@@ -28,7 +28,8 @@ func (r *Router) SaveOpenAPISpec() { // TODO how to call this?
 			Title:   config.GetString("app.name"),
 			Version: "0.0.0",
 		},
-		Paths: make(openapi3.Paths),
+		Paths:   make(openapi3.Paths),
+		Servers: makeServers(),
 	}
 
 	convertRouter(r, spec)
@@ -38,6 +39,14 @@ func (r *Router) SaveOpenAPISpec() { // TODO how to call this?
 		panic(err)
 	}
 	fmt.Println(string(json))
+}
+
+func makeServers() openapi3.Servers {
+	return openapi3.Servers{
+		&openapi3.Server{
+			URL: BaseURL(),
+		},
+	}
 }
 
 func convertRouter(r *Router, spec *openapi3.Swagger) {
