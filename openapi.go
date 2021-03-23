@@ -57,6 +57,7 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 			if route.validationRules != nil {
 				hasBody := canHaveBody(m)
 				// TODO generate schema ref instead of duplicating
+				// But it's a bit hard to identify identical schemas and parameters
 				if hasBody {
 					schema := openapi3.NewObjectSchema()
 					for name, field := range route.validationRules.Fields {
@@ -109,6 +110,11 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 			}
 
 			uri := route.BuildURL(params...)[len(BaseURL()):] // FIXME not optimized
+			if i := strings.Index(uri[1:], "/"); i != -1 {
+				op.Tags = []string{uri[1 : i+1]}
+			} else {
+				op.Tags = []string{uri[1:]}
+			}
 			spec.AddOperation(uri, m, op)
 			path := spec.Paths[uri]
 			formats := urlParamFormat.FindAllStringSubmatch(route.GetFullURI(), -1)
