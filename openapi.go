@@ -117,7 +117,7 @@ func convertRouter(r *Router, spec *openapi3.Swagger) {
 				params = append(params, "{"+p+"}")
 			}
 
-			uri := route.BuildURL(params...)[len(BaseURL()):] // FIXME not optimized
+			uri := route.BuildURI(params...)
 			if i := strings.Index(uri[1:], "/"); i != -1 {
 				op.Tags = []string{uri[1 : i+1]}
 			} else {
@@ -376,6 +376,7 @@ func readDescription(handler Handler) (string, []*annotation) {
 					continue
 				}
 			}
+			// TODO find better way to specify responses
 			// FIXME only works with one-line
 
 			text += "\n" + line
