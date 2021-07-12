@@ -18,6 +18,9 @@ type Route struct {
 	validationRules *validation.Rules
 	middlewareHolder
 	parametrizeable
+
+	// Custom
+	roles []string
 }
 
 var _ routeMatcher = (*Route)(nil) // implements routeMatcher
@@ -69,6 +72,18 @@ func (r *Route) checkMethod(method string) bool {
 
 func (r *Route) makeParameters(match []string) map[string]string {
 	return r.parametrizeable.makeParameters(match, r.parameters)
+}
+
+// Roles set the roles of the route.
+// Panics if the roles in parameters is empty.
+// Returns itself.
+func (r *Route) Roles(roles []string) *Route {
+	if len(roles) == 0 {
+		panic(fmt.Errorf("Route roles is empty"))
+	}
+
+	r.roles = roles
+	return r
 }
 
 // Name set the name of the route.
@@ -138,6 +153,11 @@ func (r *Route) BuildURL(parameters ...string) string {
 	builder.WriteString(fullURI[end:])
 
 	return builder.String()
+}
+
+// GetRoles get the roles of this route.
+func (r *Route) GetRoles() []string {
+	return r.roles
 }
 
 // GetName get the name of this route.
