@@ -54,12 +54,19 @@ func (suite *GoyaveTestSuite) TestGetAddress() {
 	suite.Equal("http://test.system-glitch.me:1235", getAddress("http"))
 	suite.Equal("https://test.system-glitch.me:1236", getAddress("https"))
 
-	config.Set("server.port", 80.0)
-	config.Set("server.httpsPort", 443.0)
+	config.Set("server.port", 80)
+	config.Set("server.httpsPort", 443)
 	suite.Equal("http://test.system-glitch.me", getAddress("http"))
 	suite.Equal("https://test.system-glitch.me", getAddress("https"))
 
 	suite.Equal(getAddress("http"), BaseURL())
+
+	config.Set("server.domain", "")
+	config.Set("server.host", "0.0.0.0")
+	config.Set("server.port", 1235)
+	config.Set("server.httpsPort", 1236)
+	suite.Equal("http://127.0.0.1:1235", getAddress("http"))
+	suite.Equal("https://127.0.0.1:1236", getAddress("https"))
 }
 
 func (suite *GoyaveTestSuite) TestStartStopServer() {
@@ -77,15 +84,9 @@ func (suite *GoyaveTestSuite) TestStartStopServer() {
 				fmt.Println("Testing on a windows machine. Cannot test proc signals")
 				Stop()
 			} else {
+				time.Sleep(10 * time.Millisecond)
 				if err := proc.Signal(syscall.SIGTERM); err != nil {
 					suite.Fail(err.Error())
-				}
-				time.Sleep(10 * time.Millisecond)
-				for IsReady() {
-					time.Sleep(10 * time.Millisecond)
-					if err := proc.Signal(syscall.SIGTERM); err != nil {
-						suite.Fail(err.Error())
-					}
 				}
 			}
 			c <- struct{}{}
@@ -100,14 +101,14 @@ func (suite *GoyaveTestSuite) TestStartStopServer() {
 
 		select {
 		case <-ctx.Done():
-			suite.Fail("Timeout exceeded in server start/stop test")
-		case <-c:
+			suite.Fail(fmt.Sprintf("Timeout (%dms) exceeded in server start/stop test", suite.Timeout().Milliseconds()))
+		case <-c2:
 			suite.False(IsReady())
 			suite.Nil(server)
+			<-c
 		}
-		<-c2
 	} else {
-		fmt.Println("WARNING: Couldn't get process PID, skipping SIGINT test")
+		suite.Fail("Couldn't get process PID, skipping SIGINT test")
 	}
 }
 
@@ -289,7 +290,6 @@ func (suite *GoyaveTestSuite) testServerError(proto string) {
 			config.Set("server.tls.cert", "doesntexist")
 		}
 
-		fmt.Println("test server error " + proto)
 		err := Start(func(router *Router) {})
 		config.Set("server.protocol", "http")
 		protocol = "http"
@@ -420,7 +420,7 @@ func (suite *GoyaveTestSuite) TestAutoMigrate() {
 }
 
 func (suite *GoyaveTestSuite) TestError() {
-	err := &Error{ExitHTTPError, fmt.Errorf("test error")}
+	err := &Error{fmt.Errorf("test error"), ExitHTTPError}
 	suite.Equal("test error", err.Error())
 }
 

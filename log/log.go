@@ -16,12 +16,12 @@ type Formatter func(now time.Time, response *goyave.Response, request *goyave.Re
 // Writer chained writer keeping response body in memory.
 // Used for loggin in common format.
 type Writer struct {
+	formatter Formatter
+	writer    io.Writer
 	now       time.Time
 	request   *goyave.Request
-	writer    io.Writer
 	response  *goyave.Response
 	length    int
-	formatter Formatter
 }
 
 var _ io.Closer = (*Writer)(nil)
@@ -48,7 +48,7 @@ func (w *Writer) PreWrite(b []byte) {
 	}
 }
 
-// Write writes the data as a response and keeps it in memory
+// Write writes the data as a response and keeps its length in memory
 // for later logging.
 func (w *Writer) Write(b []byte) (int, error) {
 	w.length += len(b)

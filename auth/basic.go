@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"reflect"
@@ -83,9 +84,7 @@ type BasicUser struct {
 	Name string
 }
 
-type basicUserAuthenticator struct {
-	Optional bool
-}
+type basicUserAuthenticator struct{}
 
 var _ Authenticator = (*basicUserAuthenticator)(nil) // implements Authenticator
 
@@ -95,8 +94,8 @@ func (a *basicUserAuthenticator) Authenticate(request *goyave.Request, user inte
 	username, password, ok := request.BasicAuth()
 
 	if !ok ||
-		username != config.GetString("auth.basic.username") ||
-		password != config.GetString("auth.basic.password") {
+		subtle.ConstantTimeCompare([]byte(config.GetString("auth.basic.username")), []byte(username)) != 1 ||
+		subtle.ConstantTimeCompare([]byte(config.GetString("auth.basic.password")), []byte(password)) != 1 {
 		return fmt.Errorf(lang.Get(request.Lang, "auth.invalid-credentials"))
 	}
 	user.(*BasicUser).Name = username

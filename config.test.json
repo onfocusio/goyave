@@ -25,12 +25,29 @@
         "maxOpenConnections": 20,
         "maxIdleConnections": 20,
         "maxLifetime": 300,
-        "autoMigrate": false
+        "autoMigrate": false,
+        "config": {
+            "skipDefaultTransaction": false,
+            "dryRun": false,
+            "prepareStmt": true,
+            "disableNestedTransaction": false,
+            "allowGlobalUpdate": false,
+            "disableAutomaticPing": false,
+            "disableForeignKeyConstraintWhenMigrating": false
+        }
     },
     "auth": {
         "jwt": {
             "expiry": 300.0,
-            "secret": "jwt-secret"
+            "secret": "jwt-secret",
+            "rsa": {
+                "private": "resources/rsa/private.pem",
+                "public": "resources/rsa/public.pem"
+            },
+            "ecdsa": {
+                "private": "resources/ecdsa/private.pem",
+                "public": "resources/ecdsa/public.pem"
+            }
         },
         "basic": {
             "username": "admin",
