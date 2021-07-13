@@ -88,7 +88,6 @@ func (r *Route) Resource(i interface{}) *Route {
 }
 
 // Roles set the roles of the route.
-// As default add the route name as role.
 // Panics if the route has an empty name.
 // Returns itself.
 func (r *Route) Roles(roles []string) *Route {
@@ -96,11 +95,12 @@ func (r *Route) Roles(roles []string) *Route {
 		panic(fmt.Errorf("Route name is empty"))
 	}
 
-	r.roles = append(roles, r.name)
+	r.roles = append(r.roles, roles...)
 	return r
 }
 
 // Name set the name of the route.
+// Set a default role with the name of the route.
 // Panics if a route with the same name already exists.
 // Returns itself.
 func (r *Route) Name(name string) *Route {
@@ -114,6 +114,7 @@ func (r *Route) Name(name string) *Route {
 
 	r.name = name
 	r.parent.namedRoutes[name] = r
+	r.roles = append(r.roles, name)
 	return r
 }
 
