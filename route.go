@@ -88,11 +88,11 @@ func (r *Route) Resource(i interface{}) *Route {
 }
 
 // Roles set the roles of the route.
-// Panics if the route has an empty name.
+// Panics if the roles of the route is empty.
 // Returns itself.
 func (r *Route) Roles(roles []string) *Route {
-	if r.name == "" {
-		panic(fmt.Errorf("Route name is empty"))
+	if len(roles) == 0 {
+		panic("Route roles is empty")
 	}
 
 	r.roles = append(r.roles, roles...)
