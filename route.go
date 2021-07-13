@@ -21,6 +21,7 @@ type Route struct {
 
 	// Custom
 	roles []string
+	resource interface{}
 }
 
 var _ routeMatcher = (*Route)(nil) // implements routeMatcher
@@ -74,15 +75,28 @@ func (r *Route) makeParameters(match []string) map[string]string {
 	return r.parameterizable.makeParameters(match, r.parameters)
 }
 
-// Roles set the roles of the route.
-// Panics if the roles in parameters is empty.
-// Returns itself.
-func (r *Route) Roles(roles []string) *Route {
-	if len(roles) == 0 {
-		panic(fmt.Errorf("Route roles is empty"))
+// Resource set the resource of the route.
+// Panics if the resource is nil.
+// Returns itself
+func (r *Route) Resource(i interface{}) *Route {
+	if i == nil {
+		panic("Route resource is nil")
 	}
 
-	r.roles = roles
+	r.resource = i
+	return r
+}
+
+// Roles set the roles of the route.
+// As default add the route name as role.
+// Panics if the route has an empty name.
+// Returns itself.
+func (r *Route) Roles(roles []string) *Route {
+	if r.name == "" {
+		panic(fmt.Errorf("Route name is empty"))
+	}
+
+	r.roles = append(roles, r.name)
 	return r
 }
 
@@ -157,6 +171,11 @@ func (r *Route) BuildURI(parameters ...string) string {
 	builder.WriteString(fullURI[end:])
 
 	return builder.String()
+}
+
+// GetResource get the resource of this route.
+func (r *Route) GetResource() interface{} {
+	return r.resource
 }
 
 // GetRoles get the roles of this route.
