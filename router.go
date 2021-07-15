@@ -30,6 +30,9 @@ type Router struct {
 	routes            []*Route
 	subrouters        []*Router
 	hasCORSMiddleware bool
+
+	// Custom
+	resource interface{}
 }
 
 var _ http.Handler = (*Router)(nil) // implements http.Handler
@@ -249,6 +252,17 @@ func (r *Router) Subrouter(prefix string) *Router {
 	return router
 }
 
+// Resource set the resource into the router
+// Panics if the resource is nil
+func (r *Router) Resource(resource interface{}) *Router {
+	if resource == nil {
+		panic("Router resource is nil")
+	}
+
+	r.resource = resource
+	return r
+}
+
 // Group create a new sub-router with an empty prefix.
 func (r *Router) Group() *Router {
 	return r.Subrouter("")
@@ -301,6 +315,12 @@ func (r *Router) registerRoute(methods string, uri string, handler Handler) *Rou
 		parent:  r,
 		handler: handler,
 	}
+
+	// Set resource from Router directly in the route
+	if r.resource != nil {
+		route.resource = r.resource
+	}
+
 	route.compileParameters(route.uri, true, r.regexCache)
 	r.routes = append(r.routes, route)
 	return route
