@@ -13,7 +13,7 @@ import (
 	"time"
 
 	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/helper/filesystem"
+	"goyave.dev/goyave/v4/util/fsutil"
 
 	_ "goyave.dev/goyave/v4/database/dialect/mysql"
 )
@@ -67,6 +67,38 @@ func (suite *GoyaveTestSuite) TestGetAddress() {
 	config.Set("server.httpsPort", 1236)
 	suite.Equal("http://127.0.0.1:1235", getAddress("http"))
 	suite.Equal("https://127.0.0.1:1236", getAddress("https"))
+
+	// Clear cached protocol value
+	// Should be loaded if not already
+	protocol = ""
+	suite.Equal(getAddress("http"), BaseURL())
+}
+
+func (suite *GoyaveTestSuite) TestProxyBaseURL() {
+	suite.loadConfig()
+
+	suite.Equal(BaseURL(), ProxyBaseURL())
+	config.Set("server.proxy.host", "127.0.0.1")
+	config.Set("server.proxy.port", 1235)
+	suite.Equal("http://127.0.0.1:1235", ProxyBaseURL())
+	config.Set("server.proxy.protocol", "https")
+	suite.Equal("https://127.0.0.1:1235", ProxyBaseURL())
+
+	config.Set("server.proxy.protocol", "http")
+	config.Set("server.proxy.host", "test.system-glitch.me")
+	suite.Equal("http://test.system-glitch.me:1235", ProxyBaseURL())
+	config.Set("server.proxy.protocol", "https")
+	suite.Equal("https://test.system-glitch.me:1235", ProxyBaseURL())
+
+	config.Set("server.proxy.protocol", "http")
+	config.Set("server.proxy.port", 80)
+	suite.Equal("http://test.system-glitch.me", ProxyBaseURL())
+
+	config.Set("server.proxy.protocol", "https")
+	config.Set("server.proxy.port", 443)
+	suite.Equal("https://test.system-glitch.me", ProxyBaseURL())
+	config.Set("server.proxy.base", "/baseurl")
+	suite.Equal("https://test.system-glitch.me/baseurl", ProxyBaseURL())
 }
 
 func (suite *GoyaveTestSuite) TestStartStopServer() {
@@ -233,7 +265,7 @@ func (suite *GoyaveTestSuite) TestStaticServing() {
 		if err != nil {
 			panic(err)
 		}
-		defer filesystem.Delete("resources/template/test-static-serve.txt")
+		defer fsutil.Delete("resources/template/test-static-serve.txt")
 		resp, err = netClient.Get("http://127.0.0.1:1235/resources/template/test-static-serve.txt")
 		suite.Nil(err)
 		if err != nil {
