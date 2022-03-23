@@ -20,7 +20,6 @@ type Route struct {
 	parameterizable
 
 	// Custom
-	roles []string
 	resource interface{}
 }
 
@@ -87,18 +86,6 @@ func (r *Route) Resource(i interface{}) *Route {
 	return r
 }
 
-// Roles set the roles of the route.
-// Panics if the roles of the route is empty.
-// Returns itself.
-func (r *Route) Roles(roles []string) *Route {
-	if len(roles) == 0 {
-		panic("Route roles is empty")
-	}
-
-	r.roles = append(r.roles, roles...)
-	return r
-}
-
 // Name set the name of the route.
 // Set a default role with the name of the route.
 // Panics if a route with the same name already exists.
@@ -114,7 +101,6 @@ func (r *Route) Name(name string) *Route {
 
 	r.name = name
 	r.parent.namedRoutes[name] = r
-	r.roles = append(r.roles, name)
 	return r
 }
 
@@ -177,11 +163,6 @@ func (r *Route) BuildURI(parameters ...string) string {
 // GetResource get the resource of this route.
 func (r *Route) GetResource() interface{} {
 	return r.resource
-}
-
-// GetRoles get the roles of this route.
-func (r *Route) GetRoles() []string {
-	return r.roles
 }
 
 // GetName get the name of this route.
