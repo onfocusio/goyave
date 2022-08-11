@@ -1,5 +1,6 @@
 <p align="center">
-    <img src="https://raw.githubusercontent.com/go-goyave/goyave/master/resources/img/logo/goyave_text.png" alt="Goyave Logo" width="550"/>
+    <img src="https://raw.githubusercontent.com/go-goyave/goyave/master/resources/img/logo/goyave_text.png#gh-light-mode-only" alt="Goyave Logo" width="550"/>
+    <img src="https://raw.githubusercontent.com/go-goyave/goyave/master/resources/img/logo/goyave_text_dark.png#gh-dark-mode-only" alt="Goyave Logo" width="550"/>
 </p>
 
 <p align="center">
@@ -47,7 +48,7 @@ The Goyave framework has an extensive documentation covering in-depth subjects a
 
 ### Requirements
 
-- Go 1.16+
+- Go 1.17+
 - Go modules
 
 ### Install using the template project
@@ -703,19 +704,17 @@ Thank you for considering contributing to the Goyave framework! You can find the
 
 I have many ideas for the future of Goyave. I would be infinitely grateful to whoever want to support me and let me continue working on Goyave and making it better and better.
 
-You can support me on Github Sponsor or Patreon.
+You can support me on Github Sponsor.
 
 <a href="https://github.com/sponsors/System-Glitch">❤ Sponsor me!</a>
-
-<a href="https://www.patreon.com/bePatron?u=25997573">
-    <img src="https://c5.patreon.com/external/logo/become_a_patron_button@2x.png" width="160">
-</a>
 
 I'm very grateful to my patrons, sponsors and donators:
 
 - Ben Hyrman
 - Massimiliano Bertinetti
 - ethicnology
+- Yariya
+- sebastien-d-me
 
 ### Contributors
 
