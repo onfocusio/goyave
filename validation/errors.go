@@ -36,6 +36,15 @@ func (e Errors) Add(path *walk.Path, message string) {
 	errs.Add(path, message)
 }
 
+func (e Errors) AddErrors(path *walk.Path, errors Errors) {
+	errs, ok := e[path.Name]
+	if !ok {
+		errs = &FieldErrors{}
+		e[path.Name] = errs
+	}
+	errs.AddErrors(path, errors)
+}
+
 // Add an error message to the element identified by the given path in the array,
 // at the given index. "-1" index is accepted to identify non-existing elements.
 // Creates all missing elements in the path.
@@ -46,6 +55,15 @@ func (e ArrayErrors) Add(path *walk.Path, index int, message string) {
 		e[index] = errs
 	}
 	errs.Add(path, message)
+}
+
+func (e ArrayErrors) AddErrors(path *walk.Path, index int, errors Errors) {
+	errs, ok := e[index]
+	if !ok {
+		errs = &FieldErrors{}
+		e[index] = errs
+	}
+	errs.AddErrors(path, errors)
 }
 
 // Add an error message to the element identified by the given path.
@@ -71,5 +89,32 @@ func (e *FieldErrors) Add(path *walk.Path, message string) {
 			e.Fields = make(Errors)
 		}
 		e.Fields.Add(path.Next, message)
+	}
+}
+
+func (e *FieldErrors) AddErrors(path *walk.Path, errors Errors) {
+	switch path.Type {
+	case walk.PathTypeElement:
+		if e.Fields == nil {
+			e.Fields = make(Errors)
+		}
+		for k, v := range errors {
+			e.Fields[k] = v
+		}
+	case walk.PathTypeArray:
+		if e.Elements == nil {
+			e.Elements = make(map[int]*FieldErrors)
+		}
+
+		index := -1
+		if path.Index != nil {
+			index = *path.Index
+		}
+		e.Elements.AddErrors(path.Next, index, errors)
+	case walk.PathTypeObject:
+		if e.Fields == nil {
+			e.Fields = make(Errors)
+		}
+		e.Fields.AddErrors(path.Next, errors)
 	}
 }

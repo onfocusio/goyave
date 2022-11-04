@@ -1946,6 +1946,79 @@ func (suite *ValidatorTestSuite) TestValidateWithExtra() {
 	suite.Equal("world", extraValue)
 }
 
+func (suite *ValidatorTestSuite) TestErrorsAddErrors() {
+	errors := Errors{}
+
+	i := 1
+	path := &walk.Path{
+		Name: "object",
+		Type: walk.PathTypeObject,
+		Next: &walk.Path{
+			Name:  "array",
+			Type:  walk.PathTypeArray,
+			Index: &i,
+			Next: &walk.Path{
+				Type: walk.PathTypeObject,
+				Next: &walk.Path{
+					Name: "field",
+					Type: walk.PathTypeElement,
+				},
+			},
+		},
+	}
+	errors.AddErrors(path, Errors{
+		"a": &FieldErrors{
+			Errors: []string{"message 1", "message 2"},
+		},
+		"b": &FieldErrors{
+			Elements: ArrayErrors{
+				1: &FieldErrors{
+					Fields: Errors{
+						"c": &FieldErrors{
+							Errors: []string{"message 3"},
+						},
+					},
+				},
+			},
+		},
+	})
+
+	expected := Errors{
+		"object": &FieldErrors{
+			Fields: Errors{
+				"array": &FieldErrors{
+					Elements: ArrayErrors{
+						i: &FieldErrors{
+							Fields: Errors{
+								"field": &FieldErrors{
+									Fields: Errors{
+										"a": &FieldErrors{
+											Errors: []string{"message 1", "message 2"},
+										},
+										"b": &FieldErrors{
+											Elements: ArrayErrors{
+												1: &FieldErrors{
+													Fields: Errors{
+														"c": &FieldErrors{
+															Errors: []string{"message 3"},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	suite.Equal(expected, errors)
+}
+
 func TestValidatorTestSuite(t *testing.T) {
 	suite.Run(t, new(ValidatorTestSuite))
 }

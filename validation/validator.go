@@ -32,10 +32,12 @@ type Ruler interface {
 type Context struct {
 	Data   map[string]interface{}
 	Extra  map[string]interface{}
+	Errors Errors
 	Value  interface{}
 	Parent interface{}
 	Field  *Field
 	Rule   *Rule
+	Path   *walk.Path
 	Now    time.Time
 
 	// The name of the field under validation
@@ -504,11 +506,12 @@ func validateField(fieldName string, field *Field, isJSON bool, data map[string]
 				Rule:   rule,
 				Now:    now,
 				Name:   c.Name,
+				Errors: errors,
+				Path:   field.getErrorPath(parentPath, c),
 			}
 			if !validationRules[rule.Name].Function(ctx) {
-				path := field.getErrorPath(parentPath, c)
 				message := processPlaceholders(fieldName, getMessage(field, rule, reflect.ValueOf(value), language), language, ctx)
-				errors.Add(path, message)
+				errors.Add(ctx.Path, message)
 				continue
 			}
 
