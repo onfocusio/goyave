@@ -37,11 +37,9 @@ Goyave is a progressive and accessible web application framework focused on REST
 
 The Goyave framework has an extensive documentation covering in-depth subjects and teaching you how to run a project using Goyave from setup to deployment.
 
-<a href="https://goyave.dev/guide/installation"><h3 align="center">Read the documentation</h3></a>
-
-<a href="https://pkg.go.dev/goyave.dev/goyave/v4"><h3 align="center">pkg.go.dev</h3></a>
-
-<a href="https://github.com/go-goyave/goyave-blog-example"><h3 align="center">Example project</h3></a>
+- [Read the documentation](https://goyave.dev/guide/installation.html)
+- [pkg.go.dev](https://pkg.go.dev/goyave.dev/goyave/v4)
+- [Example project](https://github.com/go-goyave/goyave-blog-example)
 
 ## Getting started
 
@@ -730,6 +728,7 @@ A big "Thank you" to the Goyave contributors:
 - [Louis Laurent](https://github.com/ulphidius) ([`gyv`](https://github.com/go-goyave/gyv) productivity CLI)
 - [Clement3](https://github.com/Clement3) (`search` feature on [`goyave.dev/filter`](https://github.com/go-goyave/filter))
 - [Darkweak](https://github.com/darkweak) (`HTTP cache, RFC compliant` middleware based on [Souin HTTP cache system](https://github.com/darkweak/souin))
+- [Jason C Keller](https://github.com/imuni4fun) (Testify interface compatibility)
 
 ## Used by
 
