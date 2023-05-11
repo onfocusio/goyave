@@ -41,7 +41,21 @@ type Context struct {
 	Now    time.Time
 
 	// The name of the field under validation
-	Name string
+	Name  string
+	valid bool // Set to false if there was at least one validation error on the field
+}
+
+// NewContext returns a new valid context. Used for testing.
+func NewContext() *Context {
+	return &Context{
+		valid: true,
+	}
+}
+
+// Valid returns false if at least one validator prior to the current one didn't pass
+// on the field under validation.
+func (c *Context) Valid() bool {
+	return c.valid
 }
 
 // RuleFunc function defining a validation rule.
@@ -489,6 +503,7 @@ func validateField(fieldName string, field *Field, isJSON bool, data map[string]
 		}
 
 		value := c.Value
+		valid := true
 		for _, rule := range field.Rules {
 			if rule.Name == "nullable" {
 				if value == nil {
@@ -508,8 +523,10 @@ func validateField(fieldName string, field *Field, isJSON bool, data map[string]
 				Name:   c.Name,
 				Errors: errors,
 				Path:   field.getErrorPath(parentPath, c),
+				valid:  valid,
 			}
 			if !validationRules[rule.Name].Function(ctx) {
+				valid = false
 				message := processPlaceholders(fieldName, getMessage(field, rule, reflect.ValueOf(value), language), language, ctx)
 				errors.Add(ctx.Path, message)
 				continue
