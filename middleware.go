@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"runtime"
 	"runtime/debug"
 	"strings"
 
@@ -31,6 +32,11 @@ func recoveryMiddleware(next Handler) Handler {
 				ErrLogger.Println(err)
 				response.err = err
 				response.stacktrace = string(debug.Stack())
+
+				stack := make([]uintptr, 50)
+				_ = runtime.Callers(3, stack[:])
+				response.callers = stack
+
 				response.Status(http.StatusInternalServerError)
 			}
 		}()

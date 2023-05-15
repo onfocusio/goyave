@@ -41,6 +41,7 @@ type Response struct {
 	err            interface{}
 	httpRequest    *http.Request
 	stacktrace     string
+	callers        []uintptr
 	status         int
 
 	// Used to check if controller didn't write anything so
@@ -61,6 +62,7 @@ func newResponse(writer http.ResponseWriter, rawRequest *http.Request) *Response
 		status:         0,
 		wroteHeader:    false,
 		err:            nil,
+		callers:        nil,
 	}
 }
 
@@ -186,6 +188,12 @@ func (r *Response) GetError() interface{} {
 // The stacktrace is captured by the recovery middleware.
 func (r *Response) GetStacktrace() string {
 	return r.stacktrace
+}
+
+// GetCallers return the callers of when the error occurred, or a nil slice.
+// The callers are captured by the recovery middleware.
+func (r *Response) GetCallers() []uintptr {
+	return r.callers
 }
 
 // IsEmpty return true if nothing has been written to the response body yet.
