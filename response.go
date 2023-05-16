@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"runtime"
 	"runtime/debug"
 	"strconv"
 	"text/template"
@@ -291,6 +292,9 @@ func (r *Response) Download(file string, fileName string) error {
 // write to the response, or use your error status handler.
 func (r *Response) Error(err interface{}) error {
 	ErrLogger.Println(err)
+	stack := make([]uintptr, 50)
+	_ = runtime.Callers(2, stack[:])
+	r.callers = stack
 	return r.error(err)
 }
 
