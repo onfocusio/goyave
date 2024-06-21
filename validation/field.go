@@ -1,27 +1,78 @@
 package validation
 
 import (
-	"fmt"
-
-	"goyave.dev/goyave/v4/util/walk"
+	"goyave.dev/goyave/v5/util/walk"
 )
 
-// Field is a component of route validation. A Field is a value in
-// a Rules map, the key being the name of the field.
+// Field representation of a single field in the data being validated.
+// Provides useful information based on its validators (if required, nullable, etc).
 type Field struct {
-	Path     *walk.Path
-	Elements *Field // If the field is an array, the field representing its elements, or nil
-	// Maybe use the same concept for objects too?
-	Rules      []*Rule
+	isRequired func(*Context) bool
+
+	Path       *walk.Path
+	Elements   *Field
+	Validators []Validator
+
+	// prefixDepth When using composition, `prefixDepth` allows to truncate the path to the
+	// validated element in order to retrieve the root object or array relative to
+	// the composed RuleSet.
+	prefixDepth uint
+
 	isArray    bool
 	isObject   bool
-	isRequired bool
 	isNullable bool
 }
 
+func alwaysRequired(_ *Context) bool { return true }
+
+func newField(path string, validators []Validator, prefixDepth uint) *Field {
+	p := walk.MustParse(path)
+	f := &Field{
+		Path:        p,
+		Validators:  validators,
+		prefixDepth: prefixDepth,
+	}
+
+	for _, v := range validators {
+		switch v := v.(type) {
+		case *RequiredValidator:
+			f.isRequired = alwaysRequired
+		case *RequiredIfValidator:
+			f.isRequired = v.Condition
+		case *NullableValidator:
+			f.isNullable = true
+		case *ArrayValidator:
+			f.isArray = true
+		case *ObjectValidator:
+			f.isObject = true
+		}
+	}
+
+	return f
+}
+
+// getErrorPath returns the path to use when appending the error message to the
+// final validation errors.
+//
+// The given `parentPath` corresponds to the path to the parent array
+// if the parent is an array, otherwise `nil`. If `nil`, returns the unmodified
+// path from the `walk.Context`.
+func (f *Field) getErrorPath(parentPath *walk.Path, c *walk.Context) *walk.Path {
+	if parentPath != nil {
+		clone := parentPath.Clone()
+		tail := clone.Tail()
+		tail.Type = walk.PathTypeArray
+		tail.Index = &c.Index
+		tail.Next = &walk.Path{Type: walk.PathTypeElement}
+		return clone
+	}
+
+	return c.Path
+}
+
 // IsRequired check if a field has the "required" rule
-func (f *Field) IsRequired() bool {
-	return f.isRequired
+func (f *Field) IsRequired(ctx *Context) bool {
+	return f.isRequired != nil && f.isRequired(ctx)
 }
 
 // IsNullable check if a field has the "nullable" rule
@@ -39,50 +90,9 @@ func (f *Field) IsObject() bool {
 	return f.isObject
 }
 
-// Check if rules meet the minimum parameters requirement and update
-// the isRequired, isNullable and isArray fields.
-func (f *Field) Check() {
-	for _, rule := range f.Rules {
-		switch rule.Name {
-		case "file", "mime", "image", "extension", "count",
-			"count_min", "count_max", "count_between":
-			if f.Path.HasArray() {
-				panic(fmt.Sprintf("Cannot use rule \"%s\" in array validation", rule.Name))
-			}
-		case "required":
-			f.isRequired = true
-		case "nullable":
-			f.isNullable = true
-			continue
-		case "array":
-			f.isArray = true
-		case "object":
-			f.isObject = true
-		}
-
-		def, exists := validationRules[rule.Name]
-		if !exists {
-			panic(fmt.Sprintf("Rule \"%s\" doesn't exist", rule.Name))
-		}
-		if len(rule.Params) < def.RequiredParameters {
-			panic(fmt.Sprintf("Rule \"%s\" requires %d parameter(s)", rule.Name, def.RequiredParameters))
-		}
-	}
-}
-
-func (f *Field) getErrorPath(parentPath *walk.Path, c walk.Context) *walk.Path {
-	if parentPath != nil {
-		clone := parentPath.Clone()
-		tail := clone.Tail()
-		tail.Type = walk.PathTypeArray
-		tail.Index = &c.Index
-		tail.Next = &walk.Path{Type: walk.PathTypeElement}
-		return clone
-	}
-
-	return c.Path
-}
-
-func (f *Field) apply(fieldMap FieldMap, name string) {
-	fieldMap[name] = f
+// PrefixDepth When using composition, `prefixDepth` allows to truncate the path to the
+// validated element in order to retrieve the root object or array relative to
+// the composed RuleSet.
+func (f *Field) PrefixDepth() uint {
+	return f.prefixDepth
 }

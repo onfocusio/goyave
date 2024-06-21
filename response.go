@@ -2,23 +2,19 @@ package goyave
 
 import (
 	"bufio"
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
-	htmltemplate "html/template"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
-	"os"
-	"runtime"
-	"runtime/debug"
 	"strconv"
-	"text/template"
+	"sync"
 
 	"gorm.io/gorm"
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/util/fsutil"
+	errorutil "goyave.dev/goyave/v5/util/errors"
+	"goyave.dev/goyave/v5/util/fsutil"
 )
 
 var (
@@ -35,14 +31,15 @@ type PreWriter interface {
 	PreWrite(b []byte)
 }
 
-// Response represents a controller response.
+// Response implementation wrapping `http.ResponseWriter`. Writing an HTTP response without
+// using it is incorrect. This acts as a proxy to one or many `io.Writer` chained, with the original
+// `http.ResponseWriter` always last.
 type Response struct {
 	writer         io.Writer
 	responseWriter http.ResponseWriter
-	err            interface{}
-	httpRequest    *http.Request
-	stacktrace     string
-	callers        []uintptr
+	server         *Server
+	request        *Request
+	err            *errorutil.Error
 	status         int
 
 	// Used to check if controller didn't write anything so
@@ -53,18 +50,29 @@ type Response struct {
 	hijacked    bool
 }
 
-// newResponse create a new Response using the given http.ResponseWriter and raw request.
-func newResponse(writer http.ResponseWriter, rawRequest *http.Request) *Response {
-	return &Response{
-		responseWriter: writer,
-		writer:         writer,
-		httpRequest:    rawRequest,
-		empty:          true,
-		status:         0,
-		wroteHeader:    false,
-		err:            nil,
-		callers:        nil,
-	}
+var responsePool = sync.Pool{
+	New: func() any {
+		return &Response{}
+	},
+}
+
+// NewResponse create a new Response using the given `http.ResponseWriter` and request.
+func NewResponse(server *Server, request *Request, writer http.ResponseWriter) *Response {
+	resp := responsePool.Get().(*Response)
+	resp.reset(server, request, writer)
+	return resp
+}
+
+func (r *Response) reset(server *Server, request *Request, writer http.ResponseWriter) {
+	r.writer = writer
+	r.responseWriter = writer
+	r.server = server
+	r.request = request
+	r.err = nil
+	r.status = 0
+	r.empty = true
+	r.wroteHeader = false
+	r.hijacked = false
 }
 
 // --------------------------------------
@@ -92,7 +100,8 @@ func (r *Response) PreWrite(b []byte) {
 // See http.ResponseWriter.Write
 func (r *Response) Write(data []byte) (int, error) {
 	r.PreWrite(data)
-	return r.writer.Write(data)
+	n, err := r.writer.Write(data)
+	return n, errorutil.New(err)
 }
 
 // WriteHeader sends an HTTP response header with the provided
@@ -110,6 +119,13 @@ func (r *Response) WriteHeader(status int) {
 // Header returns the header map that will be sent.
 func (r *Response) Header() http.Header {
 	return r.responseWriter.Header()
+}
+
+// Cookie add a Set-Cookie header to the response.
+// The provided cookie must have a valid Name. Invalid cookies may be
+// silently dropped.
+func (r *Response) Cookie(cookie *http.Cookie) {
+	http.SetCookie(r.responseWriter, cookie)
 }
 
 // --------------------------------------
@@ -137,7 +153,7 @@ func (r *Response) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	if e == nil {
 		r.hijacked = true
 	}
-	return c, b, e
+	return c, b, errorutil.New(e)
 }
 
 // Hijacked returns true if the underlying connection has been successfully hijacked
@@ -167,7 +183,7 @@ func (r *Response) SetWriter(writer io.Writer) {
 
 func (r *Response) close() error {
 	if wr, ok := r.writer.(io.Closer); ok {
-		return wr.Close()
+		return errorutil.New(wr.Close())
 	}
 	return nil
 }
@@ -180,23 +196,6 @@ func (r *Response) GetStatus() int {
 	return r.status
 }
 
-// GetError return the value which caused a panic in the request's handling, or nil.
-func (r *Response) GetError() interface{} {
-	return r.err
-}
-
-// GetStacktrace return the stacktrace of when the error occurred, or an empty string.
-// The stacktrace is captured by the recovery middleware.
-func (r *Response) GetStacktrace() string {
-	return r.stacktrace
-}
-
-// GetCallers return the callers of when the error occurred, or a nil slice.
-// The callers are captured by the recovery middleware.
-func (r *Response) GetCallers() []uintptr {
-	return r.callers
-}
-
 // IsEmpty return true if nothing has been written to the response body yet.
 func (r *Response) IsEmpty() bool {
 	return r.empty
@@ -207,6 +206,15 @@ func (r *Response) IsEmpty() bool {
 // and headers anymore.
 func (r *Response) IsHeaderWritten() bool {
 	return r.wroteHeader
+}
+
+// GetError return the `*errors.Error` that occurred in the process of this response, or `nil`.
+// The error can be set by:
+//   - Calling `Response.Error()`
+//   - The recovery middleware
+//   - The status handler for the 500 status code, if the error is not already set
+func (r *Response) GetError() *errorutil.Error {
+	return r.err
 }
 
 // --------------------------------------
@@ -222,27 +230,34 @@ func (r *Response) Status(status int) {
 
 // JSON write json data as a response.
 // Also sets the "Content-Type" header automatically.
-func (r *Response) JSON(responseCode int, data interface{}) error {
+func (r *Response) JSON(responseCode int, data any) {
 	r.responseWriter.Header().Set("Content-Type", "application/json; charset=utf-8")
 	r.status = responseCode
-	return json.NewEncoder(r).Encode(data)
+	if err := json.NewEncoder(r).Encode(data); err != nil {
+		panic(errorutil.NewSkip(err, 3))
+	}
 }
 
 // String write a string as a response
-func (r *Response) String(responseCode int, message string) error {
+func (r *Response) String(responseCode int, message string) {
 	r.status = responseCode
-	_, err := r.Write([]byte(message))
-	return err
+	if _, err := r.Write([]byte(message)); err != nil {
+		panic(errorutil.NewSkip(err, 3))
+	}
 }
 
-func (r *Response) writeFile(file string, disposition string) (int64, error) {
-	if !fsutil.FileExists(file) {
+func (r *Response) writeFile(fs fs.StatFS, file string, disposition string) {
+	if !fsutil.FileExists(fs, file) {
 		r.Status(http.StatusNotFound)
-		return 0, &os.PathError{Op: "open", Path: file, Err: fmt.Errorf("no such file or directory")}
+		return
 	}
 	r.empty = false
 	r.status = http.StatusOK
-	mime, size := fsutil.GetMIMEType(file)
+	mime, size, err := fsutil.GetMIMEType(fs, file)
+	if err != nil {
+		r.Error(errorutil.NewSkip(err, 4))
+		return
+	}
 	header := r.responseWriter.Header()
 	header.Set("Content-Disposition", disposition)
 
@@ -252,11 +267,16 @@ func (r *Response) writeFile(file string, disposition string) (int64, error) {
 
 	header.Set("Content-Length", strconv.FormatInt(size, 10))
 
-	f, _ := os.Open(file)
-	// No need to check for errors, fsutil.FileExists(file) and
-	// fsutil.GetMIMEType(file) already handled that.
-	defer f.Close()
-	return io.Copy(r, f)
+	f, _ := fs.Open(file)
+	// FIXME: the file is opened thrice here, can we optimize this so it's only opened once?
+	// No need to check for errors, fsutil.FileExists(fs, file) and
+	// fsutil.GetMIMEType(fs, file) already handled that.
+	defer func() {
+		_ = f.Close()
+	}()
+	if _, err := io.Copy(r, f); err != nil {
+		panic(errorutil.NewSkip(err, 4))
+	}
 }
 
 // File write a file as an inline element.
@@ -265,9 +285,8 @@ func (r *Response) writeFile(file string, disposition string) (int64, error) {
 // The given path can be relative or absolute.
 //
 // If you want the file to be sent as a download ("Content-Disposition: attachment"), use the "Download" function instead.
-func (r *Response) File(file string) error {
-	_, err := r.writeFile(file, "inline")
-	return err
+func (r *Response) File(fs fs.StatFS, file string) {
+	r.writeFile(fs, file, "inline")
 }
 
 // Download write a file as an attachment element.
@@ -279,9 +298,8 @@ func (r *Response) File(file string) error {
 // "attachment; filename="${fileName}""
 //
 // If you want the file to be sent as an inline element ("Content-Disposition: inline"), use the "File" function instead.
-func (r *Response) Download(file string, fileName string) error {
-	_, err := r.writeFile(file, fmt.Sprintf("attachment; filename=\"%s\"", fileName))
-	return err
+func (r *Response) Download(fs fs.StatFS, file string, fileName string) {
+	r.writeFile(fs, file, fmt.Sprintf("attachment; filename=\"%s\"", fileName))
 }
 
 // Error print the error in the console and return it with an error code 500 (or previously defined
@@ -290,114 +308,55 @@ func (r *Response) Download(file string, fileName string) error {
 // and the stacktrace is printed in the console.
 // If debugging is not enabled, only the status code is set, which means you can still
 // write to the response, or use your error status handler.
-func (r *Response) Error(err interface{}) error {
-	ErrLogger.Println(err)
-	stack := make([]uintptr, 50)
-	_ = runtime.Callers(2, stack[:])
-	r.callers = stack
-	return r.error(err)
+func (r *Response) Error(err any) {
+	e := errorutil.NewSkip(err, 3) // Skipped: runtime.Callers, NewSkip, this func
+	r.server.Logger.Error(e)
+	r.error(e)
 }
 
-func (r *Response) error(err interface{}) error {
-	r.err = err
-	if config.GetBool("app.debug") {
-		stacktrace := r.stacktrace
-		if stacktrace == "" {
-			stacktrace = string(debug.Stack())
+func (r *Response) error(err any) {
+	e := errorutil.NewSkip(err, 3) // Skipped: runtime.Callers, NewSkip, this func
+	if e != nil {
+		r.err = e.(*errorutil.Error)
+	} else {
+		r.err = nil
+	}
+
+	if r.server.Config().GetBool("app.debug") && r.IsEmpty() && !r.Hijacked() {
+		status := http.StatusInternalServerError
+		if r.status != 0 {
+			status = r.status
 		}
-		ErrLogger.Print(stacktrace)
-		if !r.Hijacked() {
-			var message interface{}
-			if e, ok := err.(error); ok {
-				message = e.Error()
-			} else {
-				message = err
-			}
-			status := http.StatusInternalServerError
-			if r.status != 0 {
-				status = r.status
-			}
-			return r.JSON(status, map[string]interface{}{"error": message})
-		}
+		r.JSON(status, map[string]any{"error": e})
+		return
 	}
 
 	// Don't set r.empty to false to let error status handler process the error
 	r.Status(http.StatusInternalServerError)
-	return nil
 }
 
-// Cookie add a Set-Cookie header to the response.
-// The provided cookie must have a valid Name. Invalid cookies may be
-// silently dropped.
-func (r *Response) Cookie(cookie *http.Cookie) {
-	http.SetCookie(r.responseWriter, cookie)
-}
-
-// Redirect send a permanent redirect response
-func (r *Response) Redirect(url string) {
-	http.Redirect(r, r.httpRequest, url, http.StatusPermanentRedirect)
-}
-
-// TemporaryRedirect send a temporary redirect response
-func (r *Response) TemporaryRedirect(url string) {
-	http.Redirect(r, r.httpRequest, url, http.StatusTemporaryRedirect)
-}
-
-// Render a text template with the given data.
-// The template path is relative to the "resources/template" directory.
-func (r *Response) Render(responseCode int, templatePath string, data interface{}) error {
-	tmplt, err := template.ParseFiles(r.getTemplateDirectory() + templatePath)
-	if err != nil {
-		return err
-	}
-
-	var b bytes.Buffer
-	if err := tmplt.Execute(&b, data); err != nil {
-		return err
-	}
-
-	return r.String(responseCode, b.String())
-}
-
-// RenderHTML an HTML template with the given data.
-// The template path is relative to the "resources/template" directory.
-func (r *Response) RenderHTML(responseCode int, templatePath string, data interface{}) error {
-	tmplt, err := htmltemplate.ParseFiles(r.getTemplateDirectory() + templatePath)
-	if err != nil {
-		return err
-	}
-
-	var b bytes.Buffer
-	if err := tmplt.Execute(&b, data); err != nil {
-		return err
-	}
-
-	return r.String(responseCode, b.String())
-}
-
-func (r *Response) getTemplateDirectory() string {
-	sep := string(os.PathSeparator)
-	workingDir, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	return workingDir + sep + "resources" + sep + "template" + sep
-}
-
-// HandleDatabaseError takes a database query result and checks if any error has occurred.
+// WriteDBError takes an error and automatically writes HTTP status code 404 Not Found
+// if the error is a `gorm.ErrRecordNotFound` error.
+// Calls `Response.Error()` if there is another type of error.
 //
-// Automatically writes HTTP status code 404 Not Found if the error is a "Not found" error.
-// Calls "Response.Error()" if there is another type of error.
+// Returns true if there is an error. You can then safely `return` in you controller.
 //
-// Returns true if there is no error.
-func (r *Response) HandleDatabaseError(db *gorm.DB) bool {
-	if db.Error != nil {
-		if errors.Is(db.Error, gorm.ErrRecordNotFound) {
+//	func (ctrl *ProductController) Show(response *goyave.Response, request *goyave.Request) {
+//	    product := model.Product{}
+//	    result := ctrl.DB().First(&product, request.RouteParams["id"])
+//	    if response.WriteDBError(result.Error) {
+//	        return
+//	    }
+//	    response.JSON(http.StatusOK, product)
+//	}
+func (r *Response) WriteDBError(err error) bool {
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			r.Status(http.StatusNotFound)
 		} else {
-			r.Error(db.Error)
+			r.Error(errorutil.NewSkip(err, 3))
 		}
-		return false
+		return true
 	}
-	return true
+	return false
 }

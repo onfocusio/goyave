@@ -5,42 +5,53 @@ import (
 	"net/http"
 	"strings"
 
-	"goyave.dev/goyave/v4/validation"
+	"github.com/samber/lo"
+	"goyave.dev/goyave/v5/cors"
+	"goyave.dev/goyave/v5/util/errors"
+	"goyave.dev/goyave/v5/validation"
 )
 
-// Route stores information for matching and serving.
+// Route stores information for route matching and serving and can be
+// used to generate dynamic URLs/URIs. Routes can, just like routers,
+// hold Meta information that can be used by generic middleware to
+// alter their behavior depending on the route being served.
 type Route struct {
-	name            string
-	uri             string
-	methods         []string
-	parent          *Router
-	handler         Handler
-	validationRules *validation.Rules
+	name    string
+	uri     string
+	methods []string
+	parent  *Router
+	Meta    map[string]any
+	handler Handler
 	middlewareHolder
 	parameterizable
-
-	// Custom
-	resource interface{}
 }
 
 var _ routeMatcher = (*Route)(nil) // implements routeMatcher
+
+// RuleSetFunc function generating a new validation rule set.
+// This function is called for every validated request.
+// The returned value is expected to be fresh, not re-used across
+// multiple requests nor concurrently.
+type RuleSetFunc func(*Request) validation.RuleSet
 
 // newRoute create a new route without any settings except its handler.
 // This is used to generate a fake route for the Method Not Allowed and Not Found handlers.
 // This route has the core middleware enabled and can be used without a parent router.
 // Thus, custom status handlers can use language and body.
-func newRoute(handler Handler) *Route {
+func newRoute(handler Handler, name string) *Route {
 	return &Route{
+		name:    name,
 		handler: handler,
+		Meta:    make(map[string]any),
 		middlewareHolder: middlewareHolder{
-			middleware: []Middleware{recoveryMiddleware, parseRequestMiddleware, languageMiddleware},
+			middleware: nil,
 		},
 	}
 }
 
-func (r *Route) match(req *http.Request, match *routeMatch) bool {
+func (r *Route) match(method string, match *routeMatch) bool {
 	if params := r.parameterizable.regex.FindStringSubmatch(match.currentPath); params != nil {
-		if r.checkMethod(req.Method) {
+		if r.checkMethod(method) {
 			if len(params) > 1 {
 				match.mergeParams(r.makeParameters(params))
 			}
@@ -74,29 +85,16 @@ func (r *Route) makeParameters(match []string) map[string]string {
 	return r.parameterizable.makeParameters(match, r.parameters)
 }
 
-// Resource set the resource of the route.
-// Panics if the resource is nil.
-// Returns itself
-func (r *Route) Resource(i interface{}) *Route {
-	if i == nil {
-		panic("Route resource is nil")
-	}
-
-	r.resource = i
-	return r
-}
-
 // Name set the name of the route.
-// Set a default role with the name of the route.
 // Panics if a route with the same name already exists.
 // Returns itself.
 func (r *Route) Name(name string) *Route {
 	if r.name != "" {
-		panic(fmt.Errorf("Route name is already set"))
+		panic(errors.NewSkip("route name is already set", 3))
 	}
 
 	if _, ok := r.parent.namedRoutes[name]; ok {
-		panic(fmt.Errorf("Route %q already exists", name))
+		panic(errors.NewSkip(fmt.Errorf("route %q already exists", name), 3))
 	}
 
 	r.name = name
@@ -104,13 +102,81 @@ func (r *Route) Name(name string) *Route {
 	return r
 }
 
-// Validate adds validation rules to this route. If the user-submitted data
-// doesn't pass validation, the user will receive an error and messages explaining
-// what is wrong.
+// SetMeta attach a value to this route identified by the given key.
 //
-// Returns itself.
-func (r *Route) Validate(validationRules validation.Ruler) *Route {
-	r.validationRules = validationRules.AsRules()
+// This value can override a value inherited by the parent routers for this route only.
+func (r *Route) SetMeta(key string, value any) *Route {
+	r.Meta[key] = value
+	return r
+}
+
+// RemoveMeta detach the meta value identified by the given key from this route.
+// This doesn't remove meta using the same key from the parent routers.
+func (r *Route) RemoveMeta(key string) *Route {
+	delete(r.Meta, key)
+	return r
+}
+
+// LookupMeta value identified by the given key. If not found in this route,
+// the value is recursively fetched in the parent routers.
+//
+// Returns the value and `true` if found in the current route or one of the
+// parent routers, `nil` and `false` otherwise.
+func (r *Route) LookupMeta(key string) (any, bool) {
+	val, ok := r.Meta[key]
+	if ok {
+		return val, ok
+	}
+	if r.parent == nil {
+		return nil, false
+	}
+	return r.parent.LookupMeta(key)
+}
+
+// ValidateBody adds (or replace) validation rules for the request body.
+func (r *Route) ValidateBody(validationRules RuleSetFunc) *Route {
+	validationMiddleware := findMiddleware[*validateRequestMiddleware](r.middleware)
+	if validationMiddleware == nil {
+		r.Middleware(&validateRequestMiddleware{BodyRules: validationRules})
+	} else {
+		validationMiddleware.BodyRules = validationRules
+	}
+	return r
+}
+
+// ValidateQuery adds (or replace) validation rules for the request query.
+func (r *Route) ValidateQuery(validationRules RuleSetFunc) *Route {
+	validationMiddleware := findMiddleware[*validateRequestMiddleware](r.middleware)
+	if validationMiddleware == nil {
+		r.Middleware(&validateRequestMiddleware{QueryRules: validationRules})
+	} else {
+		validationMiddleware.QueryRules = validationRules
+	}
+	return r
+}
+
+// CORS set the CORS options for this route only.
+// The "OPTIONS" method is added if this route doesn't already support it.
+//
+// If the options are not `nil`, the CORS middleware is automatically added globally.
+// To disable CORS, give `nil` options. The "OPTIONS" method will be removed
+// if it isn't the only method for this route.
+func (r *Route) CORS(options *cors.Options) *Route {
+	i := lo.IndexOf(r.methods, http.MethodOptions)
+	if options == nil {
+		r.Meta[MetaCORS] = nil
+		if len(r.methods) > 1 && i != -1 {
+			r.methods = append(r.methods[:i], r.methods[i+1:]...)
+		}
+		return r
+	}
+	r.Meta[MetaCORS] = options
+	if !hasMiddleware[*corsMiddleware](r.parent.globalMiddleware.middleware) {
+		r.parent.GlobalMiddleware(&corsMiddleware{})
+	}
+	if i == -1 {
+		r.methods = append(r.methods, http.MethodOptions)
+	}
 	return r
 }
 
@@ -118,7 +184,10 @@ func (r *Route) Validate(validationRules validation.Ruler) *Route {
 //
 // Returns itself.
 func (r *Route) Middleware(middleware ...Middleware) *Route {
-	r.middleware = middleware
+	r.middleware = append(r.middleware, middleware...)
+	for _, m := range middleware {
+		m.Init(r.parent.server)
+	}
 	return r
 }
 
@@ -126,7 +195,14 @@ func (r *Route) Middleware(middleware ...Middleware) *Route {
 // Panics if the amount of parameters doesn't match the amount of
 // actual parameters for this route.
 func (r *Route) BuildURL(parameters ...string) string {
-	return BaseURL() + r.BuildURI(parameters...)
+	return r.parent.server.BaseURL() + r.BuildURI(parameters...)
+}
+
+// BuildProxyURL build a full URL pointing to this route using the proxy base URL.
+// Panics if the amount of parameters doesn't match the amount of
+// actual parameters for this route.
+func (r *Route) BuildProxyURL(parameters ...string) string {
+	return r.parent.server.ProxyBaseURL() + r.BuildURI(parameters...)
 }
 
 // BuildURI build a full URI pointing to this route. The returned
@@ -137,7 +213,7 @@ func (r *Route) BuildURI(parameters ...string) string {
 	fullURI, fullParameters := r.GetFullURIAndParameters()
 
 	if len(parameters) != len(fullParameters) {
-		panic(fmt.Errorf("BuildURI: route has %d parameters, %d given", len(fullParameters), len(parameters)))
+		panic(errors.Errorf("BuildURI: route has %d parameters, %d given", len(fullParameters), len(parameters)))
 	}
 
 	var builder strings.Builder
@@ -158,11 +234,6 @@ func (r *Route) BuildURI(parameters ...string) string {
 	builder.WriteString(fullURI[end:])
 
 	return builder.String()
-}
-
-// GetResource get the resource of this route.
-func (r *Route) GetResource() interface{} {
-	return r.resource
 }
 
 // GetName get the name of this route.
@@ -215,9 +286,9 @@ func (r *Route) GetHandler() Handler {
 	return r.handler
 }
 
-// GetValidationRules returns the validation rules associated with this route.
-func (r *Route) GetValidationRules() *validation.Rules {
-	return r.validationRules
+// GetParent returns the parent Router of this route.
+func (r *Route) GetParent() *Router {
+	return r.parent
 }
 
 // GetFullURIAndParameters get the full uri and parameters for this route and all its parent routers.

@@ -1,39 +1,32 @@
 package validation
 
-import (
-	"regexp"
-	"sync"
-)
+import "regexp"
 
-const (
-	patternAlpha        string = "^[\\pL\\pM]+$"
-	patternAlphaDash    string = "^[\\pL\\pM0-9_-]+$"
-	patternAlphaNumeric string = "^[\\pL\\pM0-9]+$"
-	patternDigits       string = "[^0-9]"
-	patternEmail        string = "^[^@\\r\\n\\t]{1,64}@[^\\s]+$"
-)
-
-var (
-	regexCache = make(map[string]*regexp.Regexp, 5)
-	mu         = sync.RWMutex{}
-)
-
-func getRegex(pattern string) *regexp.Regexp {
-	mu.RLock()
-	regex, exists := regexCache[pattern]
-	mu.RUnlock()
-	if !exists {
-		regex = regexp.MustCompile(pattern)
-		mu.Lock()
-		regexCache[pattern] = regex
-		mu.Unlock()
-	}
-	return regex
+// RegexValidator the field under validation must be a string matching
+// the specified `*regexp.Regexp`.
+type RegexValidator struct {
+	BaseValidator
+	Regexp *regexp.Regexp
 }
 
-// ClearRegexCache empties the validation regex cache.
-// Note that if validation.Validate is subsequently called, regex will need
-// to be recompiled.
-func ClearRegexCache() {
-	regexCache = make(map[string]*regexp.Regexp, 5)
+// Validate checks the field under validation satisfies this validator's criteria.
+func (v *RegexValidator) Validate(ctx *Context) bool {
+	val, ok := ctx.Value.(string)
+	return ok && v.Regexp.MatchString(val)
+}
+
+// Name returns the string name of the validator.
+func (v *RegexValidator) Name() string { return "regex" }
+
+// MessagePlaceholders returns the ":regexp" placeholder.
+func (v *RegexValidator) MessagePlaceholders(_ *Context) []string {
+	return []string{
+		":regexp", v.Regexp.String(),
+	}
+}
+
+// Regex the field under validation must be a string matching
+// the specified `*regexp.Regexp`.
+func Regex(regex *regexp.Regexp) *RegexValidator {
+	return &RegexValidator{Regexp: regex}
 }

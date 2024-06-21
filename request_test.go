@@ -1,281 +1,94 @@
 package goyave
 
 import (
-	"net"
+	"bytes"
+	"context"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
-	"strings"
 	"testing"
-	"time"
 
-	"goyave.dev/goyave/v4/cors"
-	"goyave.dev/goyave/v4/util/fsutil"
-
-	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
-	"goyave.dev/goyave/v4/validation"
 )
 
-func createTestRequest(rawRequest *http.Request) *Request {
-	return &Request{
-		httpRequest: rawRequest,
-		Rules:       &validation.Rules{},
-		Params:      map[string]string{},
-	}
-}
-func TestRequestContentLength(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, int64(4), request.ContentLength())
-}
+func TestRequest(t *testing.T) {
 
-func TestRequestMethod(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "GET", request.Method())
+	t.Run("NewRequest", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r := NewRequest(httpReq)
 
-	rawRequest = httptest.NewRequest("POST", "/test-route", strings.NewReader("body"))
-	request = createTestRequest(rawRequest)
-	assert.Equal(t, "POST", request.Method())
-}
-
-func TestRequestRemoteAddress(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "192.0.2.1:1234", request.RemoteAddress())
-}
-
-func TestRequestProtocol(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "HTTP/1.1", request.Protocol())
-}
-
-func TestRequestURL(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "/test-route", request.URI().Path)
-}
-
-func TestRequestReferrer(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	rawRequest.Header.Set("Referer", "https://www.google.com")
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "https://www.google.com", request.Referrer())
-}
-
-func TestRequestUserAgent(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	rawRequest.Header.Set("User-Agent", "goyave/version")
-	request := createTestRequest(rawRequest)
-	assert.Equal(t, "goyave/version", request.UserAgent())
-}
-
-func TestRequestCookies(t *testing.T) {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	rawRequest.AddCookie(&http.Cookie{
-		Name:  "cookie-name",
-		Value: "test",
-	})
-	request := createTestRequest(rawRequest)
-	cookies := request.Cookies()
-	assert.Equal(t, 1, len(cookies))
-	assert.Equal(t, "cookie-name", cookies[0].Name)
-	assert.Equal(t, "test", cookies[0].Value)
-}
-
-func TestRequestValidate(t *testing.T) {
-	rawRequest := httptest.NewRequest("POST", "/test-route", strings.NewReader("string=hello%20world&number=42"))
-	rawRequest.Header.Set("Content-Type", "application/json")
-	request := createTestRequest(rawRequest)
-
-	validation.AddRule("test_extra_request", &validation.RuleDefinition{
-		Function: func(ctx *validation.Context) bool {
-			r, ok := ctx.Extra["request"].(*Request)
-			assert.True(t, ok)
-			assert.Equal(t, request, r)
-			return true
-		},
+		assert.Equal(t, httpReq, r.httpRequest)
+		assert.False(t, r.Now.IsZero())
+		assert.NotNil(t, r.Extra)
 	})
 
-	request.Data = map[string]interface{}{
-		"string": "hello world",
-		"number": 42,
-	}
-	request.Rules = validation.RuleSet{
-		"string": validation.List{"required", "string", "test_extra_request"},
-		"number": validation.List{"required", "numeric", "min:10"},
-	}.AsRules()
-	errors := request.validate()
-	assert.Nil(t, errors)
+	t.Run("Accessors", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodPost, "/test", bytes.NewBufferString("hello"))
+		httpReq.Header.Set("X-Test", "value")
+		httpReq.Header.Set("Referer", "referrer")
+		httpReq.Header.Set("User-Agent", "useragent")
+		httpReq.SetBasicAuth("username", "password")
+		httpReq.AddCookie(&http.Cookie{Name: "test-cookie", Value: "value"})
+		r := NewRequest(httpReq)
 
-	rawRequest = httptest.NewRequest("POST", "/test-route", strings.NewReader("string=hello%20world"))
-	rawRequest.Header.Set("Content-Type", "application/json")
-	request = createTestRequest(rawRequest)
-	request.Data = map[string]interface{}{
-		"string": "hello world",
-	}
+		assert.Equal(t, httpReq, r.Request())
+		assert.Equal(t, http.MethodPost, r.Method())
+		assert.Equal(t, "HTTP/1.1", r.Protocol())
+		assert.Equal(t, "/test", r.URL().String())
 
-	request.Rules = &validation.Rules{
-		Fields: validation.FieldMap{
-			"string": &validation.Field{
-				Rules: []*validation.Rule{
-					{Name: "required"},
-					{Name: "string"},
-				},
-			},
-			"number": &validation.Field{
-				Rules: []*validation.Rule{
-					{Name: "required"},
-					{Name: "numeric"},
-					{Name: "min", Params: []string{"50"}},
-				},
-			},
-		},
-	}
-	errors = request.validate()
-	assert.NotNil(t, errors)
-	assert.Equal(t, 2, len(errors["number"].Errors))
+		assert.Equal(t, httpReq.Header, r.Header())
+		assert.Equal(t, "/test", r.URL().String())
+		assert.Equal(t, int64(5), r.ContentLength())
+		assert.Equal(t, "192.0.2.1:1234", r.RemoteAddress())
 
-	rawRequest = httptest.NewRequest("POST", "/test-route", strings.NewReader("string=hello%20world&number=42"))
-	rawRequest.Header.Set("Content-Type", "application/json")
-	request = createTestRequest(rawRequest)
-	request.Rules = nil
-	errors = request.validate()
-	assert.Nil(t, errors)
-}
+		cookies := r.Cookies()
+		assert.Equal(t, cookies, r.cookies)
+		assert.Equal(t, []*http.Cookie{{Name: "test-cookie", Value: "value"}}, cookies)
 
-func TestRequestAccessors(t *testing.T) {
-	loc, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		panic(err)
-	}
+		assert.Equal(t, "referrer", r.Referrer())
+		assert.Equal(t, "useragent", r.UserAgent())
 
-	uid, err := uuid.Parse("3bbcee75-cecc-5b56-8031-b6641c1ed1f1")
-	if err != nil {
-		panic(err)
-	}
+		username, password, ok := r.BasicAuth()
+		assert.Equal(t, "username", username)
+		assert.Equal(t, "password", password)
+		assert.True(t, ok)
 
-	date, err := time.Parse("2006-01-02", "2019-11-21")
-	if err != nil {
-		panic(err)
-	}
+		assert.NotNil(t, r.Body())
+		httpReq = httptest.NewRequest(http.MethodGet, "/test", nil)
+		assert.NotNil(t, NewRequest(httpReq).Body())
+	})
 
-	url, err := url.ParseRequestURI("https://google.com")
-	if err != nil {
-		panic(err)
-	}
+	t.Run("BearerToken", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/test", nil)
+		httpReq.Header.Set("Authorization", "Bearer  token  ")
+		r := NewRequest(httpReq)
 
-	rawRequest := httptest.NewRequest("POST", "/test-route", nil)
-	request := createTestRequest(rawRequest)
-	request.Data = map[string]interface{}{
-		"string":   "hello world",
-		"integer":  42,
-		"numeric":  42.3,
-		"bool":     true,
-		"file":     []fsutil.File{{MIMEType: "image/png"}},
-		"timezone": loc,
-		"ip":       net.ParseIP("127.0.0.1"),
-		"uuid":     uid,
-		"date":     date,
-		"url":      url,
-		"object": map[string]interface{}{
-			"hello": "world",
-		},
-	}
+		token, ok := r.BearerToken()
+		assert.Equal(t, "token", token)
+		assert.True(t, ok)
 
-	assert.Equal(t, "hello world", request.String("string"))
-	assert.Equal(t, 42, request.Integer("integer"))
-	assert.Equal(t, 42.3, request.Numeric("numeric"))
-	assert.Equal(t, rawRequest, request.Request())
-	assert.True(t, request.Bool("bool"))
+		httpReq = httptest.NewRequest(http.MethodGet, "/test", nil)
+		r = NewRequest(httpReq)
 
-	files := request.File("file")
-	assert.Len(t, files, 1)
-	assert.Equal(t, "image/png", files[0].MIMEType)
+		token, ok = r.BearerToken()
+		assert.Empty(t, token)
+		assert.False(t, ok)
+	})
 
-	assert.Equal(t, "America/New_York", request.Timezone("timezone").String())
-	assert.Equal(t, "127.0.0.1", request.IP("ip").String())
-	assert.Equal(t, "3bbcee75-cecc-5b56-8031-b6641c1ed1f1", request.UUID("uuid").String())
-	assert.Equal(t, "2019-11-21 00:00:00 +0000 UTC", request.Date("date").String())
-	assert.Equal(t, "https://google.com", request.URL("url").String())
-	assert.Equal(t, request.Data["object"], request.Object("object"))
+	t.Run("Context", func(t *testing.T) {
+		httpReq := httptest.NewRequest(http.MethodGet, "/test", nil)
+		r := NewRequest(httpReq)
 
-	assert.Panics(t, func() { request.String("integer") })
-	assert.Panics(t, func() { request.Integer("string") })
-	assert.Panics(t, func() { request.Numeric("string") })
-	assert.Panics(t, func() { request.Bool("string") })
-	assert.Panics(t, func() { request.File("string") })
-	assert.Panics(t, func() { request.Timezone("string") })
-	assert.Panics(t, func() { request.IP("string") })
-	assert.Panics(t, func() { request.UUID("string") })
-	assert.Panics(t, func() { request.Date("string") })
-	assert.Panics(t, func() { request.URL("string") })
-	assert.Panics(t, func() { request.String("doesn't exist") })
-	assert.Panics(t, func() { request.Object("doesn't exist") })
-}
+		ctx := r.Context()
+		if !assert.NotNil(t, ctx) {
+			return
+		}
+		assert.Equal(t, httpReq.Context(), ctx)
 
-func TestRequestHas(t *testing.T) {
-	request := createTestRequest(httptest.NewRequest("POST", "/test-route", nil))
-	request.Data = map[string]interface{}{
-		"string": "hello world",
-	}
+		key := struct{}{}
+		r2 := r.WithContext(context.WithValue(ctx, key, "value"))
+		assert.Equal(t, r, r2)
 
-	assert.True(t, request.Has("string"))
-	assert.False(t, request.Has("not_in_request"))
-}
-
-func TestRequestCors(t *testing.T) {
-	request := createTestRequest(httptest.NewRequest("POST", "/test-route", nil))
-
-	assert.Nil(t, request.CORSOptions())
-
-	request.corsOptions = cors.Default()
-	options := request.CORSOptions()
-	assert.NotNil(t, options)
-
-	// Check cannot alter config
-	options.MaxAge = time.Second
-	assert.NotEqual(t, request.corsOptions.MaxAge, options.MaxAge)
-}
-
-func TestGetBearerToken(t *testing.T) {
-	request := createTestRequest(httptest.NewRequest("POST", "/test-route", nil))
-	request.Header().Set("Authorization", "NotBearer 123456789")
-	token, ok := request.BearerToken()
-	assert.Empty(t, token)
-	assert.False(t, ok)
-
-	request.Header().Set("Authorization", "Bearer123456789")
-	token, ok = request.BearerToken()
-	assert.Empty(t, token)
-	assert.False(t, ok)
-
-	request.Header().Set("Authorization", "Bearer 123456789")
-	token, ok = request.BearerToken()
-	assert.Equal(t, "123456789", token)
-	assert.True(t, ok)
-}
-
-func TestToStruct(t *testing.T) {
-	type UserInsertRequest struct {
-		Username string
-		Email    string
-	}
-
-	request := createTestRequest(httptest.NewRequest("POST", "/test-route", nil))
-	request.Data = map[string]interface{}{
-		"username": "johndoe",
-		"email":    "johndoe@example.org",
-	}
-
-	userInsertRequest := UserInsertRequest{}
-
-	if err := request.ToStruct(&userInsertRequest); err != nil {
-		assert.FailNow(t, err.Error())
-	}
-
-	assert.Equal(t, "johndoe", userInsertRequest.Username)
-	assert.Equal(t, "johndoe@example.org", userInsertRequest.Email)
+		ctx2 := r.Context()
+		assert.Equal(t, "value", ctx2.Value(key))
+	})
 }

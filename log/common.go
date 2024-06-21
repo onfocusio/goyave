@@ -2,11 +2,11 @@ package log
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
-	"time"
 
-	"goyave.dev/goyave/v4"
+	"github.com/samber/lo"
 )
 
 const (
@@ -18,9 +18,9 @@ const (
 )
 
 // CommonLogFormatter build a log entry using the Common Log Format.
-func CommonLogFormatter(now time.Time, response *goyave.Response, request *goyave.Request, length int) string {
-	req := request.Request()
-	url := request.URI()
+func CommonLogFormatter(ctx *Context) (string, []slog.Attr) {
+	req := ctx.Request.Request()
+	url := ctx.Request.URL()
 
 	username := "-"
 	if url.User != nil {
@@ -47,20 +47,41 @@ func CommonLogFormatter(now time.Time, response *goyave.Response, request *goyav
 		uri = url.RequestURI()
 	}
 
-	return fmt.Sprintf(Format,
+	message := fmt.Sprintf(Format,
 		host,
 		"-",
 		username,
-		now.Format(TimestampFormat),
+		ctx.Request.Now.Format(TimestampFormat),
 		req.Method,
 		strconv.QuoteToASCII(uri),
 		req.Proto,
-		response.GetStatus(),
-		length,
+		ctx.Status,
+		ctx.Length,
 	)
+
+	details := slog.Group("details",
+		slog.String("host", host),
+		slog.String("username", username),
+		slog.Time("time", ctx.Request.Now),
+		slog.String("method", req.Method),
+		slog.String("uri", uri),
+		slog.String("proto", req.Proto),
+		slog.Int("status", ctx.Status),
+		slog.Int("length", ctx.Length),
+	)
+
+	return message, []slog.Attr{details}
 }
 
 // CombinedLogFormatter build a log entry using the Combined Log Format.
-func CombinedLogFormatter(now time.Time, response *goyave.Response, request *goyave.Request, length int) string {
-	return fmt.Sprintf("%s \"%s\" \"%s\"", CommonLogFormatter(now, response, request, length), request.Referrer(), request.UserAgent())
+func CombinedLogFormatter(ctx *Context) (string, []slog.Attr) {
+	message, attrs := CommonLogFormatter(ctx)
+
+	message = fmt.Sprintf("%s \"%s\" \"%s\"", message, ctx.Request.Referrer(), ctx.Request.UserAgent())
+
+	details := lo.Map(attrs[0].Value.Group(), func(a slog.Attr, _ int) any { return a })
+	details = append(details, slog.String("referrer", ctx.Request.Referrer()), slog.String("userAgent", ctx.Request.UserAgent()))
+	attrs = []slog.Attr{slog.Group("details", details...)}
+
+	return message, attrs
 }

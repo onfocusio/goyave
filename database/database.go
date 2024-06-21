@@ -1,239 +1,102 @@
 package database
 
 import (
-	"fmt"
-	"strconv"
-	"strings"
-	"sync"
+	"errors"
 	"time"
 
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
-	"goyave.dev/goyave/v4/config"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/slog"
+
+	errorutil "goyave.dev/goyave/v5/util/errors"
 )
 
-// Initializer is a function meant to modify a connection settings
-// at the global scope when it's created.
+// New create a new connection pool using the settings defined in the given configuration.
 //
-// Use `db.InstantSet()` and not `db.Set()`, since the latter clones
-// the gorm.DB instance instead of modifying it.
-type Initializer func(*gorm.DB)
-
-// DialectorInitializer function initializing a GORM Dialector using the given
-// data source name (DSN).
-type DialectorInitializer func(dsn string) gorm.Dialector
-
-type dialect struct {
-	initializer DialectorInitializer
-	template    string
-}
-
-var (
-	dbConnection *gorm.DB
-	mu           sync.Mutex
-	models       []interface{}
-	initializers []Initializer
-
-	dialects = map[string]dialect{}
-
-	optionPlaceholders = map[string]string{
-		"{username}": "database.username",
-		"{password}": "database.password",
-		"{host}":     "database.host",
-		"{name}":     "database.name",
-		"{options}":  "database.options",
-	}
-)
-
-// GetConnection returns the global database connection pool.
-// Creates a new connection pool if no connection is available.
+// In order to use a specific driver / dialect ("mysql", "sqlite3", ...), you must not
+// forget to blank-import it in your main file.
 //
-// The connections will be closed automatically on server shutdown so you
-// don't need to call "Close()" when you're done with the database.
-func GetConnection() *gorm.DB {
-	mu.Lock()
-	defer mu.Unlock()
-	if dbConnection == nil {
-		dbConnection = newConnection()
-	}
-	return dbConnection
-}
-
-// Conn alias for GetConnection.
-func Conn() *gorm.DB {
-	return GetConnection()
-}
-
-// SetConnection manually replace the automatic DB connection.
-// If a connection already exists, closes it before discarding it.
-// This can be used to create a mock DB in tests. Using this function
-// is not recommended outside of tests. Prefer using a custom dialect.
-func SetConnection(dialector gorm.Dialector) (*gorm.DB, error) {
-	mu.Lock()
-	defer mu.Unlock()
-	if dbConnection != nil {
-		if err := closeDB(); err != nil {
-			return nil, err
-		}
-	}
-	db, err := gorm.Open(dialector, newConfig())
-	if err != nil {
-		return nil, err
-	}
-
-	initSQLDB(db)
-	dbConnection = db
-	return dbConnection, nil
-}
-
-func closeDB() error {
-	var err error
-	if dbConnection != nil {
-		db, _ := dbConnection.DB()
-		err = db.Close()
-		dbConnection = nil
-	}
-	return err
-}
-
-// Close the database connections if they exist.
-func Close() error {
-	mu.Lock()
-	defer mu.Unlock()
-	return closeDB()
-}
-
-// AddInitializer adds a database connection initializer function.
-// Initializer functions are meant to modify a connection settings
-// at the global scope when it's created.
-//
-// Initializer functions are called in order, meaning that functions
-// added last can override settings defined by previous ones.
-func AddInitializer(initializer Initializer) {
-	initializers = append(initializers, initializer)
-}
-
-// ClearInitializers remove all database connection initializer functions.
-func ClearInitializers() {
-	initializers = []Initializer{}
-}
-
-// RegisterModel registers a model for auto-migration.
-// When writing a model file, you should always register it in the init() function.
-//
-//	 func init() {
-//			database.RegisterModel(&MyModel{})
-//	 }
-func RegisterModel(model interface{}) {
-	models = append(models, model)
-}
-
-// GetRegisteredModels get the registered models.
-// The returned slice is a copy of the original, so it
-// cannot be modified.
-func GetRegisteredModels() []interface{} {
-	return append(make([]interface{}, 0, len(models)), models...)
-}
-
-// ClearRegisteredModels unregister all models.
-func ClearRegisteredModels() {
-	models = []interface{}{}
-}
-
-// Migrate migrates all registered models.
-func Migrate() {
-	db := GetConnection()
-	for _, model := range models {
-		if err := db.AutoMigrate(model); err != nil {
-			panic(err)
-		}
-	}
-}
-
-// RegisterDialect registers a connection string template for the given dialect.
-//
-// You cannot override a dialect that already exists.
-//
-// Template format accepts the following placeholders, which will be replaced with
-// the corresponding configuration entries automatically:
-//   - "{username}"
-//   - "{password}"
-//   - "{host}"
-//   - "{port}"
-//   - "{name}"
-//   - "{options}"
-//
-// Example template for the "mysql" dialect:
-//
-//	{username}:{password}@({host}:{port})/{name}?{options}
-func RegisterDialect(name, template string, initializer DialectorInitializer) {
-	mu.Lock()
-	defer mu.Unlock()
-	if _, ok := dialects[name]; ok {
-		panic(fmt.Sprintf("Dialect %q already exists", name))
-	}
-	dialects[name] = dialect{initializer, template}
-}
-
-func newConnection() *gorm.DB {
-	driver := config.GetString("database.connection")
+//	import _ "goyave.dev/goyave/v5/database/dialect/mysql"
+//	import _ "goyave.dev/goyave/v5/database/dialect/postgres"
+//	import _ "goyave.dev/goyave/v5/database/dialect/sqlite"
+//	import _ "goyave.dev/goyave/v5/database/dialect/mssql"
+func New(cfg *config.Config, logger func() *slog.Logger) (*gorm.DB, error) {
+	driver := cfg.GetString("database.connection")
 
 	if driver == "none" {
-		panic("Cannot create DB connection. Database is set to \"none\" in the config")
+		return nil, errorutil.Errorf("Cannot create DB connection. Database is set to \"none\" in the config")
 	}
 
 	dialect, ok := dialects[driver]
 	if !ok {
-		panic(fmt.Sprintf("DB Connection %q not supported, forgotten import?", driver))
+		return nil, errorutil.Errorf("DB Connection %q not supported, forgotten import?", driver)
 	}
 
-	dsn := dialect.buildDSN()
-	db, err := gorm.Open(dialect.initializer(dsn), newConfig())
+	dsn := dialect.buildDSN(cfg)
+	db, err := gorm.Open(dialect.initializer(dsn), newConfig(cfg, logger))
 	if err != nil {
-		panic(err)
+		return nil, errorutil.New(err)
 	}
 
-	initSQLDB(db)
-	return db
+	if err := initTimeoutPlugin(cfg, db); err != nil {
+		return db, errorutil.New(err)
+	}
+
+	return db, initSQLDB(cfg, db)
 }
 
-func newConfig() *gorm.Config {
-	logLevel := logger.Silent
-	if config.GetBool("app.debug") {
-		logLevel = logger.Info
+// NewFromDialector create a new connection pool from a gorm dialector and using the settings
+// defined in the given configuration.
+//
+// This can be used in tests to create a mock connection pool.
+func NewFromDialector(cfg *config.Config, logger func() *slog.Logger, dialector gorm.Dialector) (*gorm.DB, error) {
+	db, err := gorm.Open(dialector, newConfig(cfg, logger))
+	if err != nil {
+		return nil, errorutil.New(err)
+	}
+
+	if err := initTimeoutPlugin(cfg, db); err != nil {
+		return db, errorutil.New(err)
+	}
+
+	return db, initSQLDB(cfg, db)
+}
+
+func newConfig(cfg *config.Config, logger func() *slog.Logger) *gorm.Config {
+	if !cfg.GetBool("app.debug") {
+		// Stay silent about DB operations when not in debug mode
+		logger = nil
 	}
 	return &gorm.Config{
-		Logger:                                   logger.Default.LogMode(logLevel),
-		SkipDefaultTransaction:                   config.GetBool("database.config.skipDefaultTransaction"),
-		DryRun:                                   config.GetBool("database.config.dryRun"),
-		PrepareStmt:                              config.GetBool("database.config.prepareStmt"),
-		DisableNestedTransaction:                 config.GetBool("database.config.disableNestedTransaction"),
-		AllowGlobalUpdate:                        config.GetBool("database.config.allowGlobalUpdate"),
-		DisableAutomaticPing:                     config.GetBool("database.config.disableAutomaticPing"),
-		DisableForeignKeyConstraintWhenMigrating: config.GetBool("database.config.disableForeignKeyConstraintWhenMigrating"),
+		Logger:                                   NewLogger(logger),
+		SkipDefaultTransaction:                   cfg.GetBool("database.config.skipDefaultTransaction"),
+		DryRun:                                   cfg.GetBool("database.config.dryRun"),
+		PrepareStmt:                              cfg.GetBool("database.config.prepareStmt"),
+		DisableNestedTransaction:                 cfg.GetBool("database.config.disableNestedTransaction"),
+		AllowGlobalUpdate:                        cfg.GetBool("database.config.allowGlobalUpdate"),
+		DisableAutomaticPing:                     cfg.GetBool("database.config.disableAutomaticPing"),
+		DisableForeignKeyConstraintWhenMigrating: cfg.GetBool("database.config.disableForeignKeyConstraintWhenMigrating"),
 	}
 }
 
-func initSQLDB(db *gorm.DB) {
+func initTimeoutPlugin(cfg *config.Config, db *gorm.DB) error {
+	timeoutPlugin := &TimeoutPlugin{
+		ReadTimeout:  time.Duration(cfg.GetInt("database.defaultReadQueryTimeout")) * time.Millisecond,
+		WriteTimeout: time.Duration(cfg.GetInt("database.defaultWriteQueryTimeout")) * time.Millisecond,
+	}
+	return errorutil.New(db.Use(timeoutPlugin))
+}
+
+func initSQLDB(cfg *config.Config, db *gorm.DB) error {
 	sqlDB, err := db.DB()
 	if err != nil {
-		panic(err)
+		if errors.Is(err, gorm.ErrInvalidDB) {
+			return nil
+		}
+		return errorutil.New(err)
 	}
-	sqlDB.SetMaxOpenConns(config.GetInt("database.maxOpenConnections"))
-	sqlDB.SetMaxIdleConns(config.GetInt("database.maxIdleConnections"))
-	sqlDB.SetConnMaxLifetime(time.Duration(config.GetInt("database.maxLifetime")) * time.Second)
-
-	for _, initializer := range initializers {
-		initializer(db)
-	}
-}
-
-func (d dialect) buildDSN() string {
-	connStr := d.template
-	for k, v := range optionPlaceholders {
-		connStr = strings.Replace(connStr, k, config.GetString(v), 1)
-	}
-	connStr = strings.Replace(connStr, "{port}", strconv.Itoa(config.GetInt("database.port")), 1)
-
-	return connStr
+	sqlDB.SetMaxOpenConns(cfg.GetInt("database.maxOpenConnections"))
+	sqlDB.SetMaxIdleConns(cfg.GetInt("database.maxIdleConnections"))
+	sqlDB.SetConnMaxLifetime(time.Duration(cfg.GetInt("database.maxLifetime")) * time.Second)
+	return nil
 }

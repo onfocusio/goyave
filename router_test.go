@@ -1,983 +1,545 @@
 package goyave
 
 import (
+	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
-	"strconv"
+	"strings"
 	"testing"
 
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/cors"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/cors"
+	"goyave.dev/goyave/v5/util/fsutil"
+	"goyave.dev/goyave/v5/util/fsutil/osfs"
 )
 
-type RouterTestSuite struct {
-	TestSuite
-	middlewareExecuted bool
+type testStatusHandler struct {
+	Component
 }
 
-func createRouterTestRequest(url string) (*Request, *Response) {
-	rawRequest := httptest.NewRequest("GET", url, nil)
-	request := &Request{
-		httpRequest: rawRequest,
-		Params:      map[string]string{"resource": url},
+func (*testStatusHandler) Handle(response *Response, _ *Request) {
+	message := map[string]string{
+		"status": http.StatusText(response.GetStatus()),
 	}
-	response := newResponse(httptest.NewRecorder(), nil)
-	return request, response
+	response.JSON(response.GetStatus(), message)
 }
 
-func (suite *RouterTestSuite) routerTestMiddleware(handler Handler) Handler {
-	return func(response *Response, request *Request) {
-		suite.middlewareExecuted = true
-		handler(response, request)
-	}
+type extraMiddlewareOrder struct{}
+
+type testMiddleware struct {
+	Component
+	key string
 }
 
-func (suite *RouterTestSuite) createOrderedTestMiddleware(result *string, str string) Middleware {
-	return func(next Handler) Handler {
-		return func(response *Response, r *Request) {
-			*result += str
-			next(response, r)
+func (m *testMiddleware) Handle(next Handler) Handler {
+	return func(r *Response, req *Request) {
+		var slice []string
+		if s, ok := req.Extra[extraMiddlewareOrder{}]; !ok {
+			slice = []string{}
+		} else {
+			slice = s.([]string)
 		}
+		slice = append(slice, m.key)
+		req.Extra[extraMiddlewareOrder{}] = slice
+		next(r, req)
 	}
 }
 
-func (suite *RouterTestSuite) TestNewRouter() {
-	router := NewRouter()
-	suite.NotNil(router)
-	suite.NotNil(router.regexCache)
-	suite.Nil(router.parent)
-	suite.Empty(router.prefix)
-	suite.False(router.hasCORSMiddleware)
-	suite.Equal(0, len(router.middleware))
-	suite.Equal(3, len(router.globalMiddleware.middleware))
-	suite.NotEmpty(router.statusHandlers)
-}
-
-func (suite *RouterTestSuite) TestClearRegexCache() {
-	router := NewRouter()
-	subrouter := router.Subrouter("/sub")
-	router.ClearRegexCache()
-	suite.Nil(router.regexCache)
-	suite.Nil(subrouter.regexCache)
-}
-
-func (suite *RouterTestSuite) TestRouterRegisterRoute() {
-	router := NewRouter()
-	route := router.Route("GET", "/uri", func(resp *Response, r *Request) {})
-	suite.Contains(router.routes, route)
-	suite.Equal(router, route.parent)
-
-	route = router.Route("GET", "/", func(resp *Response, r *Request) {})
-	suite.Equal("/", route.uri)
-	suite.Equal(router, route.parent)
-
-	route = router.Route("GET|POST", "/", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"GET", "POST", "HEAD"}, route.methods)
-	suite.Equal(router, route.parent)
-
-	subrouter := router.Subrouter("/sub")
-	route = subrouter.Route("GET", "/", func(resp *Response, r *Request) {})
-	suite.Equal("", route.uri)
-
-	group := router.Group()
-	route = group.Route("GET", "/", func(resp *Response, r *Request) {})
-	suite.Equal("/", route.uri)
-
-	group2 := router.Subrouter("/")
-	route = group2.Route("GET", "/", func(resp *Response, r *Request) {})
-	suite.Equal("/", route.uri)
-}
-
-func (suite *RouterTestSuite) TestRouterMiddleware() {
-	router := NewRouter()
-	suite.Equal(0, len(router.middleware))
-	router.Middleware(suite.routerTestMiddleware)
-	suite.Equal(1, len(router.middleware))
-}
-
-func (suite *RouterTestSuite) TestSubRouter() {
-	router := NewRouter()
-	suite.Equal(0, len(router.middleware))
-	router.Middleware(suite.routerTestMiddleware)
-	suite.Equal(1, len(router.middleware))
-
-	subrouter := router.Subrouter("/sub")
-	suite.Contains(router.subrouters, subrouter)
-	suite.Equal(0, len(subrouter.middleware)) // Middleware inherited, not copied
-	suite.Equal(router.globalMiddleware.middleware, subrouter.globalMiddleware.middleware)
-	suite.Equal(len(router.statusHandlers), len(subrouter.statusHandlers))
-
-	subrouter.Middleware(suite.routerTestMiddleware)
-	suite.Equal(1, len(router.middleware))
-	suite.Equal(1, len(subrouter.middleware))
-
-	subrouter.GlobalMiddleware(suite.routerTestMiddleware)
-	suite.Equal(4, len(router.globalMiddleware.middleware))
-	suite.Equal(router.globalMiddleware.middleware, subrouter.globalMiddleware.middleware)
-
-	router = NewRouter()
-	subrouter = router.Subrouter("/")
-	suite.Empty(subrouter.prefix)
-}
-
-func (suite *RouterTestSuite) TestCleanStaticPath() {
-	suite.Equal("config/index.html", cleanStaticPath("config", "index.html"))
-	suite.Equal("config/index.html", cleanStaticPath("config", ""))
-	suite.Equal("config/defaults.json", cleanStaticPath("config", "defaults.json"))
-	suite.Equal("resources/lang/en-US/locale.json", cleanStaticPath("resources", "lang/en-US/locale.json"))
-	suite.Equal("resources/lang/en-US/locale.json", cleanStaticPath("resources", "/lang/en-US/locale.json"))
-	suite.Equal("resources/img/logo/index.html", cleanStaticPath("resources", "img/logo"))
-	suite.Equal("resources/img/logo/index.html", cleanStaticPath("resources", "img/logo/"))
-	suite.Equal("resources/img/index.html", cleanStaticPath("resources", "img"))
-	suite.Equal("resources/img/index.html", cleanStaticPath("resources", "img/"))
-}
-
-func (suite *RouterTestSuite) TestStaticHandler() {
-	request, response := createRouterTestRequest("/config.test.json")
-	handler := staticHandler("config", false)
-	handler(response, request)
-	result := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(200, result.StatusCode)
-	suite.Equal("application/json", result.Header.Get("Content-Type"))
-	suite.Equal("inline", result.Header.Get("Content-Disposition"))
-
-	body, err := io.ReadAll(result.Body)
+func prepareRouterTest() *Router {
+	server, err := New(Options{Config: config.LoadDefault()})
 	if err != nil {
 		panic(err)
 	}
-	result.Body.Close()
-
-	suite.True(len(body) > 0)
-
-	request, response = createRouterTestRequest("/doesn'texist")
-	handler = staticHandler("config", false)
-	handler(response, request)
-	result = response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(200, result.StatusCode) // Not written yet
-	suite.Equal(http.StatusNotFound, response.GetStatus())
-
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-
-	suite.Equal(0, len(body))
-
-	request, response = createRouterTestRequest("/config.test.json")
-	handler = staticHandler("config", true)
-	handler(response, request)
-	result = response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(200, result.StatusCode)
-	suite.Equal("application/json", result.Header.Get("Content-Type"))
-	suite.Equal("attachment; filename=\"config.test.json\"", result.Header.Get("Content-Disposition"))
-
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-
-	suite.True(len(body) > 0)
+	return NewRouter(server)
 }
 
-func (suite *RouterTestSuite) TestRequestHandler() {
-	rawRequest := httptest.NewRequest("GET", "/uri", nil)
-	writer := httptest.NewRecorder()
-	router := NewRouter()
-
-	route := &Route{}
-	var tmp *Route
-	route.handler = func(response *Response, request *Request) {
-		suite.NotNil(request.Extra)
-		tmp = request.Route()
-		response.String(200, "Hello world")
-	}
-	match := &routeMatch{route: route}
-	router.requestHandler(match, writer, rawRequest)
-	suite.Equal(route, tmp)
-
-	result := writer.Result()
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(200, result.StatusCode)
-	suite.Equal("Hello world", string(body))
-
-	writer = httptest.NewRecorder()
-	router = NewRouter()
-	router.Middleware(suite.routerTestMiddleware)
-
-	match = &routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {},
-			parent:  router,
-		},
-	}
-	router.requestHandler(match, writer, rawRequest)
-
-	result = writer.Result()
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(204, result.StatusCode)
-	suite.Equal(0, len(body))
-	suite.True(suite.middlewareExecuted)
-	suite.middlewareExecuted = false
-
-	writer = httptest.NewRecorder()
-	router = NewRouter()
-	match = &routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {
-				response.Status(http.StatusNotFound)
-			},
-		},
-	}
-	router.requestHandler(match, writer, rawRequest)
-
-	result = writer.Result()
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(http.StatusNotFound, result.StatusCode)
-	suite.Equal("{\"error\":\""+http.StatusText(http.StatusNotFound)+"\"}\n", string(body))
+type testController struct {
+	Component
+	registered bool
 }
 
-func (suite *RouterTestSuite) TestCORS() {
-	router := NewRouter()
-	suite.Nil(router.corsOptions)
+func (c *testController) RegisterRoutes(_ *Router) {
+	c.registered = true
+}
 
-	router.CORS(cors.Default())
+func TestRouter(t *testing.T) {
 
-	suite.NotNil(router.corsOptions)
-	suite.True(router.hasCORSMiddleware)
-
-	route := router.registerRoute("GET", "/cors", helloHandler)
-	suite.Equal([]string{"GET", "OPTIONS", "HEAD"}, route.methods)
-
-	match := routeMatch{currentPath: "/cors"}
-	suite.True(route.match(httptest.NewRequest("OPTIONS", "/cors", nil), &match))
-	match = routeMatch{currentPath: "/cors"}
-	suite.True(route.match(httptest.NewRequest("GET", "/cors", nil), &match))
-
-	writer := httptest.NewRecorder()
-	router.Middleware(func(handler Handler) Handler {
-		return func(response *Response, request *Request) {
-			suite.NotNil(request.corsOptions)
-			suite.NotNil(request.CORSOptions())
-			handler(response, request)
+	t.Run("New", func(t *testing.T) {
+		router := prepareRouterTest()
+		if !assert.NotNil(t, router) {
+			return
 		}
-	})
-	rawRequest := httptest.NewRequest("GET", "/cors", nil)
+		assert.NotNil(t, router.server)
+		assert.Nil(t, router.parent)
+		assert.Empty(t, router.prefix)
+		assert.Len(t, router.statusHandlers, 41)
+		assert.NotNil(t, router.namedRoutes)
+		assert.NotNil(t, router.Meta)
 
-	match = routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {},
-		},
-	}
-	router.requestHandler(&match, writer, rawRequest)
-}
-
-func (suite *RouterTestSuite) TestCORSSubrouter() {
-	router := NewRouter()
-	suite.Nil(router.corsOptions)
-
-	options := cors.Default()
-	group := router.Group()
-	group.CORS(options)
-	group.registerRoute("GET", "/cors", helloHandler)
-	match := routeMatch{currentPath: "/cors"}
-	suite.True(router.match(httptest.NewRequest("OPTIONS", "/cors", nil), &match))
-
-	writer := httptest.NewRecorder()
-	executed := false
-	group.Middleware(func(handler Handler) Handler {
-		return func(response *Response, request *Request) {
-			executed = true
-			suite.NotNil(request.corsOptions)
-			suite.NotNil(request.CORSOptions())
-			suite.Same(options, request.corsOptions)
-			handler(response, request)
+		recoveryMiddleware := findMiddleware[*recoveryMiddleware](router.globalMiddleware.middleware)
+		langMiddleware := findMiddleware[*languageMiddleware](router.globalMiddleware.middleware)
+		if assert.NotNil(t, recoveryMiddleware) {
+			assert.Equal(t, router.server, recoveryMiddleware.server)
+		}
+		if assert.NotNil(t, langMiddleware) {
+			assert.Equal(t, router.server, langMiddleware.server)
 		}
 	})
 
-	rawRequest := httptest.NewRequest("GET", "/cors", nil)
-	router.requestHandler(&match, writer, rawRequest)
-	suite.True(executed)
+	t.Run("ClearRegexCache", func(t *testing.T) {
+		router := prepareRouterTest()
+		subrouter := router.Subrouter("/subrouter")
 
-	// Method not allowed
-	executed = false
-	rawRequest = httptest.NewRequest("POST", "/cors", nil)
-	router.requestHandler(&match, writer, rawRequest)
-	suite.True(executed)
-}
+		assert.NotNil(t, router.regexCache)
 
-func (suite *RouterTestSuite) TestCORSNotFound() {
-	// Should use main router settings
-	router := NewRouter()
-	rootOptions := cors.Default()
-	router.CORS(rootOptions)
-
-	options := cors.Default()
-	group := router.Group()
-	group.CORS(options)
-	group.registerRoute("GET", "/cors", helloHandler)
-	match := routeMatch{currentPath: "/notaroute"}
-	router.match(httptest.NewRequest("GET", "/notaroute", nil), &match)
-
-	writer := httptest.NewRecorder()
-	executed := false
-	match.route = newRoute(func(response *Response, request *Request) {
-		executed = true
-		suite.Same(rootOptions, request.corsOptions)
+		router.ClearRegexCache()
+		assert.Nil(t, router.regexCache)
+		assert.Nil(t, subrouter.regexCache)
 	})
 
-	rawRequest := httptest.NewRequest("GET", "/notaroute", nil)
-	router.requestHandler(&match, writer, rawRequest)
-	suite.True(executed)
-}
+	t.Run("Accessors", func(t *testing.T) {
+		router := prepareRouterTest()
+		subrouter := router.Subrouter("/subrouter")
+		route := subrouter.Get("/route", func(_ *Response, _ *Request) {}).Name("route-name")
 
-func (suite *RouterTestSuite) TestPanicStatusHandler() {
-	request, response := createRouterTestRequest("/uri")
-	response.err = "random error"
-	PanicStatusHandler(response, request)
-	result := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(500, result.StatusCode)
-	result.Body.Close()
-}
-
-func (suite *RouterTestSuite) TestErrorStatusHandler() {
-	request, response := createRouterTestRequest("/uri")
-	response.Status(http.StatusNotFound)
-	ErrorStatusHandler(response, request)
-	result := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(http.StatusNotFound, result.StatusCode)
-	suite.Equal("application/json; charset=utf-8", result.Header.Get("Content-Type"))
-
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal("{\"error\":\""+http.StatusText(http.StatusNotFound)+"\"}\n", string(body))
-}
-
-func (suite *RouterTestSuite) TestStatusHandlers() {
-	rawRequest := httptest.NewRequest("GET", "/uri", nil)
-	writer := httptest.NewRecorder()
-	router := NewRouter()
-	router.StatusHandler(func(response *Response, request *Request) {
-		response.String(http.StatusInternalServerError, "An unexpected panic occurred.")
-	}, http.StatusInternalServerError)
-
-	match := &routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {
-				panic("Panic")
-			},
-			parent: router,
-		},
-	}
-	router.requestHandler(match, writer, rawRequest)
-
-	result := writer.Result()
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(500, result.StatusCode)
-	suite.Equal("An unexpected panic occurred.", string(body))
-
-	// On subrouters
-	subrouter := router.Subrouter("/sub")
-	writer = httptest.NewRecorder()
-
-	subrouter.requestHandler(match, writer, rawRequest)
-
-	result = writer.Result()
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(500, result.StatusCode)
-	suite.Equal("An unexpected panic occurred.", string(body))
-
-	// Multiple statuses
-	writer = httptest.NewRecorder()
-	subrouter.StatusHandler(func(response *Response, request *Request) {
-		response.String(response.GetStatus(), http.StatusText(response.GetStatus()))
-	}, http.StatusBadRequest, http.StatusNotFound)
-
-	match = &routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {
-				response.Status(http.StatusBadRequest)
-			},
-		},
-	}
-	subrouter.requestHandler(match, writer, rawRequest)
-
-	result = writer.Result()
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(http.StatusBadRequest, result.StatusCode)
-	suite.Equal(http.StatusText(http.StatusBadRequest), string(body))
-
-	writer = httptest.NewRecorder()
-
-	match = &routeMatch{
-		route: &Route{
-			handler: func(response *Response, request *Request) {
-				response.Status(http.StatusNotFound)
-			},
-		},
-	}
-	subrouter.requestHandler(match, writer, rawRequest)
-
-	result = writer.Result()
-	body, err = io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(http.StatusNotFound, result.StatusCode)
-	suite.Equal(http.StatusText(http.StatusNotFound), string(body))
-}
-
-func (suite *RouterTestSuite) TestRouteNoMatch() {
-	rawRequest := httptest.NewRequest("GET", "/uri", nil)
-	writer := httptest.NewRecorder()
-	router := NewRouter()
-
-	match := &routeMatch{route: notFoundRoute}
-	router.requestHandler(match, writer, rawRequest)
-	result := writer.Result()
-	suite.Equal(http.StatusNotFound, result.StatusCode)
-	result.Body.Close()
-
-	writer = httptest.NewRecorder()
-	match = &routeMatch{route: methodNotAllowedRoute}
-	router.requestHandler(match, writer, rawRequest)
-	result = writer.Result()
-	suite.Equal(http.StatusMethodNotAllowed, result.StatusCode)
-	result.Body.Close()
-}
-
-func (suite *RouterTestSuite) TestNamedRoutes() {
-	r := NewRouter()
-	route := r.Route("GET", "/uri", func(resp *Response, r *Request) {})
-	route.Name("get-uri")
-	suite.Equal(route, r.namedRoutes["get-uri"])
-	suite.Equal(route, r.GetRoute("get-uri"))
-
-	subrouter := r.Subrouter("/sub")
-	suite.Equal(route, subrouter.GetRoute("get-uri"))
-
-	route2 := r.Route("GET", "/other-route", func(resp *Response, r *Request) {})
-	suite.Panics(func() {
-		route2.Name("get-uri")
+		assert.Equal(t, router, subrouter.GetParent())
+		assert.Equal(t, []*Route{route}, subrouter.GetRoutes())
+		assert.Equal(t, []*Router{subrouter}, router.GetSubrouters())
+		assert.Equal(t, route, router.GetRoute("route-name"))
+		assert.Equal(t, route, subrouter.GetRoute("route-name"))
 	})
-	suite.Empty(route2.GetName())
 
-	// Global router
-	router = r
-	suite.Equal(route, GetRoute("get-uri"))
-	router = nil
-}
+	t.Run("Meta", func(t *testing.T) {
+		router := prepareRouterTest()
+		router.Meta["parent-meta"] = "parent-value"
+		subrouter := router.Subrouter("/subrouter")
+		subrouter.SetMeta("meta-key", "meta-value")
+		assert.Equal(t, map[string]any{"meta-key": "meta-value"}, subrouter.Meta)
 
-func (suite *RouterTestSuite) TestMiddleware() {
-	// Test the middleware execution order
-	result := ""
-	middleware := make([]Middleware, 0, 4)
-	for i := 0; i < 4; i++ {
-		middleware = append(middleware, suite.createOrderedTestMiddleware(&result, strconv.Itoa(i+1)))
-	}
-	router := NewRouter()
-	router.Middleware(middleware[0])
-	router.GlobalMiddleware(suite.createOrderedTestMiddleware(&result, "g1"), suite.createOrderedTestMiddleware(&result, "g2"))
+		val, ok := subrouter.LookupMeta("meta-key")
+		assert.Equal(t, "meta-value", val)
+		assert.True(t, ok)
 
-	subrouter := router.Subrouter("/")
-	subrouter.Middleware(middleware[1])
-	subrouter.GlobalMiddleware(suite.createOrderedTestMiddleware(&result, "g3"))
+		val, ok = subrouter.LookupMeta("parent-meta")
+		assert.Equal(t, "parent-value", val)
+		assert.True(t, ok)
 
-	handler := func(response *Response, r *Request) {
-		result += "5"
-	}
-	route := subrouter.Route("GET", "/hello", handler).Middleware(middleware[2], middleware[3])
+		val, ok = subrouter.LookupMeta("nonexistent")
+		assert.Nil(t, val)
+		assert.False(t, ok)
 
-	rawRequest := httptest.NewRequest("GET", "/hello", nil)
-	match := routeMatch{
-		route:       route,
-		currentPath: rawRequest.URL.Path,
-	}
-	router.requestHandler(&match, httptest.NewRecorder(), rawRequest)
+		subrouter.RemoveMeta("meta-key")
+		assert.Empty(t, subrouter.Meta)
 
-	suite.Equal("g1g2g312345", result)
-}
-
-func (suite *RouterTestSuite) TestCoreMiddleware() {
-	// Ensure core middleware is executed on Not Found and Method Not Allowed
-	router := NewRouter()
-
-	match := &routeMatch{
-		route: newRoute(func(response *Response, request *Request) {
-			panic("Test panic") // Test recover middleware is executed
-		}),
-	}
-
-	writer := httptest.NewRecorder()
-	prev := config.Get("app.debug")
-	config.Set("app.debug", false)
-	router.requestHandler(match, writer, httptest.NewRequest("GET", "/uri", nil))
-	config.Set("app.debug", prev)
-
-	result := writer.Result()
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal(500, result.StatusCode)
-	suite.Equal("{\"error\":\"Internal Server Error\"}\n", string(body))
-
-	lang := ""
-	param := ""
-	match = &routeMatch{
-		route: newRoute(func(response *Response, request *Request) {
-			// Test lang and parse request
-			lang = request.Lang
-			param = request.String("param")
-		}),
-	}
-
-	writer = httptest.NewRecorder()
-	router.requestHandler(match, writer, httptest.NewRequest("GET", "/uri?param=param", nil))
-	suite.Equal("en-US", lang)
-	suite.Equal("param", param)
-
-	// Custom middleware shouldn't be executed
-	strResult := ""
-	testMiddleware := suite.createOrderedTestMiddleware(&strResult, "1")
-	router.Middleware(testMiddleware)
-
-	match = &routeMatch{route: notFoundRoute}
-	router.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Empty(strResult)
-
-	strResult = ""
-	match = &routeMatch{route: methodNotAllowedRoute}
-	router.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Empty(strResult)
-
-	// Global middleware should be executed
-	router.GlobalMiddleware(testMiddleware)
-	strResult = ""
-	match = &routeMatch{route: methodNotAllowedRoute}
-	router.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Equal("1", strResult)
-
-	strResult = ""
-	match = &routeMatch{route: notFoundRoute}
-	router.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Equal("1", strResult)
-
-	// On subrouter
-	router.globalMiddleware.middleware = []Middleware{}
-	subrouter := router.Subrouter("/sub")
-	strResult = ""
-	match = &routeMatch{route: notFoundRoute}
-	subrouter.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Empty(strResult)
-
-	strResult = ""
-	match = &routeMatch{route: methodNotAllowedRoute}
-	subrouter.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Empty(strResult)
-
-	router.GlobalMiddleware(testMiddleware)
-	strResult = ""
-	match = &routeMatch{route: methodNotAllowedRoute}
-	subrouter.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Equal("1", strResult)
-
-	strResult = ""
-	match = &routeMatch{route: notFoundRoute}
-	subrouter.requestHandler(match, httptest.NewRecorder(), httptest.NewRequest("GET", "/uri", nil))
-	suite.Equal("1", strResult)
-}
-
-func (suite *RouterTestSuite) TestMiddlewareHolder() {
-	result := ""
-	testMiddleware := suite.createOrderedTestMiddleware(&result, "1")
-	secondTestMiddleware := suite.createOrderedTestMiddleware(&result, "2")
-
-	holder := &middlewareHolder{[]Middleware{testMiddleware, secondTestMiddleware}}
-	handler := holder.applyMiddleware(func(response *Response, r *Request) {
-		result += "3"
+		subrouter.SetMeta("parent-meta", "override")
+		val, ok = subrouter.LookupMeta("parent-meta")
+		assert.Equal(t, "override", val)
+		assert.True(t, ok)
 	})
-	handler(suite.CreateTestResponse(httptest.NewRecorder()), suite.CreateTestRequest(nil))
-	suite.Equal("123", result)
-}
 
-func (suite *RouterTestSuite) TestTrimCurrentPath() {
-	routeMatch := routeMatch{currentPath: "/product/55"}
-	routeMatch.trimCurrentPath("/product")
-	suite.Equal("/55", routeMatch.currentPath)
-}
+	t.Run("GlobalMiddleware", func(t *testing.T) {
+		router := prepareRouterTest()
+		router.GlobalMiddleware(&corsMiddleware{}, &validateRequestMiddleware{})
+		assert.Len(t, router.globalMiddleware.middleware, 4)
+		for _, m := range router.globalMiddleware.middleware {
+			assert.NotNil(t, m.Server())
+		}
+	})
 
-func (suite *RouterTestSuite) TestMatch() {
-	handler := func(response *Response, r *Request) {
-		response.String(http.StatusOK, "Hello")
-	}
+	t.Run("Middleware", func(t *testing.T) {
+		router := prepareRouterTest()
+		router.Middleware(&corsMiddleware{}, &validateRequestMiddleware{})
+		assert.Len(t, router.middleware, 2)
+		for _, m := range router.middleware {
+			assert.NotNil(t, m.Server())
+		}
+	})
 
-	router := NewRouter()
-	router.Route("GET", "/", handler).Name("root")
-	router.Route("GET|POST", "/hello", handler).Name("hello")
-	router.Route("PUT", "/hello", handler).Name("hello.put")
-	router.Route("GET", "/hello/sub", handler).Name("hello.sub")
+	t.Run("CORS", func(t *testing.T) {
+		router := prepareRouterTest()
+		opts := cors.Default()
 
-	productRouter := router.Subrouter("/product")
-	productRouter.Route("GET", "/", handler).Name("product.index")
-	productRouter.Route("GET", "/{id:[0-9]+}", handler).Name("product.show")
-	productRouter.Route("GET", "/{id:[0-9]+}/details", handler).Name("product.show.details")
+		router.CORS(opts)
 
-	userRouter := router.Subrouter("/user")
-	userRouter.Route("GET", "/", handler).Name("user.index")
-	userRouter.Route("GET", "/{id:[0-9]+}", handler).Name("user.show")
+		assert.Equal(t, opts, router.Meta[MetaCORS])
+		assert.True(t, hasMiddleware[*corsMiddleware](router.globalMiddleware.middleware))
 
-	router.Subrouter("/empty")
+		// OPTIONS method is added to routes if the router has CORS
+		route := router.Get("/route", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodGet, http.MethodOptions, http.MethodHead}, route.methods)
 
-	match := routeMatch{currentPath: "/"}
-	suite.True(router.match(httptest.NewRequest("GET", "/", nil), &match))
-	suite.Equal(router.GetRoute("root"), match.route)
+		// OPTIONS method is added to routes if one of the parent routes has CORS
+		route = router.Subrouter("/subrouter").Get("/route", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodGet, http.MethodOptions, http.MethodHead}, route.methods)
 
-	match = routeMatch{currentPath: "/hello"}
-	suite.True(router.match(httptest.NewRequest("GET", "/hello", nil), &match))
-	suite.Equal(router.GetRoute("hello"), match.route)
+		// Disable in subrouter
+		subrouter := router.Subrouter("/subrouter2")
+		subrouter.CORS(nil)
+		route = subrouter.Get("/route-2", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
 
-	match = routeMatch{currentPath: "/hello/sub"}
-	suite.True(router.match(httptest.NewRequest("GET", "/hello/sub", nil), &match))
-	suite.Equal(router.GetRoute("hello.sub"), match.route)
+		// Disable
+		router.CORS(nil)
+		assert.Contains(t, router.Meta, MetaCORS)
+		assert.Nil(t, router.Meta[MetaCORS])
+		route = router.Get("/route-2", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
 
-	match = routeMatch{currentPath: "/product"}
-	suite.True(router.match(httptest.NewRequest("GET", "/product", nil), &match))
-	suite.Equal(router.GetRoute("product.index"), match.route)
+	})
 
-	match = routeMatch{currentPath: "/product/5"}
-	suite.True(router.match(httptest.NewRequest("GET", "/product/5", nil), &match))
-	suite.Equal(router.GetRoute("product.show"), match.route)
-	suite.Equal("5", match.parameters["id"])
+	t.Run("StatusHandler", func(t *testing.T) {
+		router := prepareRouterTest()
 
-	match = routeMatch{currentPath: "/product/5/details"}
-	suite.True(router.match(httptest.NewRequest("GET", "/product/5/details", nil), &match))
-	suite.Equal(router.GetRoute("product.show.details"), match.route)
-	suite.Equal("5", match.parameters["id"])
+		statusHandler := &testStatusHandler{}
+		router.StatusHandler(statusHandler, 1, 2, 3)
 
-	match = routeMatch{currentPath: "/user"}
-	suite.True(router.match(httptest.NewRequest("GET", "/user", nil), &match))
-	suite.Equal(router.GetRoute("user.index"), match.route)
+		assert.Equal(t, router.server, statusHandler.server)
+		assert.Equal(t, statusHandler, router.statusHandlers[1])
+		assert.Equal(t, statusHandler, router.statusHandlers[2])
+		assert.Equal(t, statusHandler, router.statusHandlers[3])
+	})
 
-	match = routeMatch{currentPath: "/user/42"}
-	suite.True(router.match(httptest.NewRequest("GET", "/user/42", nil), &match))
-	suite.Equal(router.GetRoute("user.show"), match.route)
-	suite.Equal("42", match.parameters["id"])
+	t.Run("Subrouter", func(t *testing.T) {
+		router := prepareRouterTest()
+		router.Get("/named", nil).Name("route-name")
+		subrouter := router.Subrouter("/subrouter")
 
-	match = routeMatch{currentPath: "/product/notaroute"}
-	suite.False(router.match(httptest.NewRequest("GET", "/product/notaroute", nil), &match))
-	suite.Equal(notFoundRoute, match.route)
+		assert.Equal(t, router.server, subrouter.server)
+		assert.Equal(t, router, subrouter.parent)
+		assert.Equal(t, "/subrouter", subrouter.prefix)
+		assert.Equal(t, router.statusHandlers, subrouter.statusHandlers)
+		assert.NotSame(t, router.statusHandlers, subrouter.statusHandlers)
+		assert.Equal(t, router.namedRoutes, subrouter.namedRoutes)
+		assert.Equal(t, router.globalMiddleware, subrouter.globalMiddleware)
+		assert.Equal(t, router.regexCache, subrouter.regexCache)
+		assert.NotNil(t, subrouter.Meta)
+		assert.Empty(t, subrouter.Meta)
+		assert.Equal(t, []*Router{subrouter}, router.subrouters)
+		assert.NotNil(t, subrouter.regex)
 
-	match = routeMatch{currentPath: "/empty"}
-	suite.False(router.match(httptest.NewRequest("GET", "/empty", nil), &match))
-	suite.Equal(notFoundRoute, match.route)
+		slash := router.Subrouter("/")
+		group := router.Group()
+		assert.Empty(t, slash.prefix)
+		assert.Equal(t, slash, group)
+	})
 
-	match = routeMatch{currentPath: "/product"}
-	suite.True(router.match(httptest.NewRequest("DELETE", "/product", nil), &match))
-	suite.Equal(methodNotAllowedRoute, match.route)
+	t.Run("Route", func(t *testing.T) {
+		router := prepareRouterTest()
 
-	// ------------
+		route := router.Route([]string{http.MethodPost, http.MethodPut}, "/uri/{param}", func(_ *Response, _ *Request) {})
+		assert.Empty(t, route.name)
+		assert.Equal(t, "/uri/{param}", route.uri)
+		assert.Equal(t, []string{http.MethodPost, http.MethodPut}, route.methods)
+		assert.Equal(t, router, route.parent)
+		assert.NotNil(t, route.handler)
+		assert.NotNil(t, route.Meta)
+		assert.NotNil(t, route.regex)
 
-	paramSubrouter := router.Subrouter("/{param}")
-	route := paramSubrouter.Route("GET", "/{subparam}", handler).Name("param.name")
-	match = routeMatch{currentPath: "/name/surname"}
-	suite.True(router.match(httptest.NewRequest("GET", "/name/surname", nil), &match))
-	suite.Equal(route, match.route)
-	suite.Equal("name", match.parameters["param"])
-	suite.Equal("surname", match.parameters["subparam"])
-
-	// ------------
-
-	match = routeMatch{currentPath: "/user/42"}
-	suite.False(productRouter.match(httptest.NewRequest("GET", "/user/42", nil), &match))
-	match = routeMatch{currentPath: "/product/42"}
-	suite.True(productRouter.match(httptest.NewRequest("GET", "/product/42", nil), &match))
-	suite.Equal(router.GetRoute("product.show"), match.route)
-	suite.Equal("42", match.parameters["id"])
-
-	match = routeMatch{currentPath: "/user/42/extra"}
-	suite.False(userRouter.match(httptest.NewRequest("GET", "/user/42/extra", nil), &match))
-}
-
-func (suite *RouterTestSuite) TestScheme() {
-	// From HTTP to HTTPS
-	protocol = "https"
-	config.Set("server.protocol", "https")
-
-	router := NewRouter()
-
-	recorder := httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest("GET", "http://localhost:443/test?param=1", nil))
-	result := recorder.Result()
-	body, err := io.ReadAll(result.Body)
-	suite.Nil(err)
-	result.Body.Close()
-
-	suite.Equal(http.StatusPermanentRedirect, result.StatusCode)
-	suite.Equal("<a href=\"https://127.0.0.1:1236/test?param=1\">Permanent Redirect</a>.\n\n", string(body))
-
-	// From HTTPS to HTTP
-	config.Set("server.protocol", "http")
-	protocol = "http"
-
-	recorder = httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest("GET", "https://localhost:80/test?param=1", nil))
-	result = recorder.Result()
-	body, err = io.ReadAll(result.Body)
-	suite.Nil(err)
-	result.Body.Close()
-
-	suite.Equal(http.StatusPermanentRedirect, result.StatusCode)
-	suite.Equal("<a href=\"http://127.0.0.1:1235/test?param=1\">Permanent Redirect</a>.\n\n", string(body))
-
-	// Only URI
-	recorder = httptest.NewRecorder()
-	router.ServeHTTP(recorder, httptest.NewRequest("GET", "/test?param=1", nil))
-	result = recorder.Result()
-	body, err = io.ReadAll(result.Body)
-	suite.Nil(err)
-	result.Body.Close()
-
-	suite.Equal(http.StatusNotFound, result.StatusCode)
-	suite.Equal("{\"error\":\"Not Found\"}\n", string(body))
-}
-
-func (suite *RouterTestSuite) TestConflictingRoutes() {
-	// Test subrouter has priority over routes
-	handler := func(response *Response, request *Request) {
-		response.Status(200)
-	}
-	router := NewRouter()
-
-	subrouter := router.Subrouter("/product")
-	routeSub := subrouter.Route("GET", "/{id:[0-9]+}", handler)
-
-	router.Route("GET", "/product/{id:[0-9]+}", handler)
-
-	req := httptest.NewRequest("GET", "/product/2", nil)
-	match := routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-
-	suite.Equal(routeSub, match.route)
-
-	// Test when route not in subrouter but first segment matches
-	// Should not match
-	router.Route("GET", "/product/test", handler)
-
-	req = httptest.NewRequest("GET", "/product/test", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-
-	suite.Equal(notFoundRoute, match.route)
-}
-
-func (suite *RouterTestSuite) TestSubrouterEmptyPrefix() {
-	result := ""
-	handler := func(resp *Response, r *Request) {}
-	router := NewRouter()
-
-	productRouter := router.Subrouter("/product")
-	productRouter.Route("GET", "/", handler).Name("product.index")
-	productRouter.Route("GET", "/{id:[0-9]+}", handler).Name("product.show")
-	productRouter.Route("POST", "/hardpath", handler).Name("product.hardpath.post")
-	productRouter.Route("GET", "/conflict", handler).Name("product.conflict")
-
-	// This route group has an empty prefix, the full path is identical to productRouter.
-	// However this group has a middleware and some conflicting routes with productRouter.
-	// Conflict should be resolved and both routes should be able to match.
-	groupProductRouter := productRouter.Subrouter("/")
-	groupProductRouter.Middleware(suite.createOrderedTestMiddleware(&result, "1"))
-	groupProductRouter.Route("POST", "/", handler).Name("product.store")
-	groupProductRouter.Route("GET", "/hardpath", handler).Name("product.hardpath.get")
-	groupProductRouter.Route("PUT", "/{id:[0-9]+}", handler).Name("product.update")
-	groupProductRouter.Route("GET", "/conflict", handler).Name("product.conflict.group")
-	groupProductRouter.Route("POST", "/method", handler).Name("product.method")
-
-	req := httptest.NewRequest("GET", "/product", nil)
-	match := routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.index", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Empty(result)
-	result = ""
-
-	req = httptest.NewRequest("POST", "/product", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.store", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Equal("1", result)
-	result = ""
-
-	req = httptest.NewRequest("GET", "/product/hardpath", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.hardpath.get", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Equal("1", result)
-	result = ""
-
-	req = httptest.NewRequest("POST", "/product/hardpath", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.hardpath.post", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Empty(result)
-	result = ""
-
-	req = httptest.NewRequest("GET", "/product/42", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.show", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Empty(result)
-	result = ""
-
-	req = httptest.NewRequest("PUT", "/product/42", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.update", match.route.name)
-	router.requestHandler(&match, httptest.NewRecorder(), req)
-	suite.Equal("1", result)
-	result = ""
-
-	req = httptest.NewRequest("GET", "/product/conflict", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal("product.conflict.group", match.route.name)
-
-	req = httptest.NewRequest("GET", "/product/method", nil)
-	match = routeMatch{currentPath: req.URL.Path}
-	router.match(req, &match)
-	suite.Equal(methodNotAllowedRoute, match.route)
-}
-
-func (suite *RouterTestSuite) TestChainedWriterCloseOnPanic() {
-	result := ""
-	testWr := &testWriter{nil, &result, "0", false}
-
-	suite.RunServer(func(router *Router) {
-		router.Middleware(func(next Handler) Handler {
-			return func(response *Response, r *Request) {
-				testWr.Writer = response.Writer()
-				response.SetWriter(testWr)
-
-				next(response, r)
-			}
+		t.Run("HEAD_added_on_GET_routes", func(t *testing.T) {
+			route := router.Route([]string{http.MethodGet}, "/uri", func(_ *Response, _ *Request) {})
+			assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
 		})
-		router.Route("GET", "/panic", func(response *Response, req *Request) {
-			panic("chained writer panic")
-		})
-	}, func() {
-		resp, err := suite.Get("/panic", nil)
-		if err != nil {
-			panic(err)
-		}
-		defer resp.Body.Close()
 
-		suite.Equal(500, resp.StatusCode)
-		suite.True(testWr.closed)
+		t.Run("trim_slash", func(t *testing.T) {
+			// Not trimmed because no parent
+			route := router.Route([]string{http.MethodGet}, "/", func(_ *Response, _ *Request) {})
+			assert.Equal(t, "/", route.uri)
+
+			route = router.Subrouter("/subrouter").Route([]string{http.MethodGet}, "/", func(_ *Response, _ *Request) {})
+			assert.Equal(t, "", route.uri)
+		})
 	})
 
-	suite.True(testWr.closed)
-}
+	t.Run("Get", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Get("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
+	})
 
-func (suite *RouterTestSuite) TestMethodRouteRegistration() {
-	router := NewRouter()
-	route := router.Get("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"GET", "HEAD"}, route.methods)
+	t.Run("Post", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Post("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodPost}, route.methods)
+	})
 
-	route = router.Post("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"POST"}, route.methods)
+	t.Run("Put", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Put("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodPut}, route.methods)
+	})
 
-	route = router.Put("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"PUT"}, route.methods)
+	t.Run("Patch", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Patch("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodPatch}, route.methods)
+	})
 
-	route = router.Patch("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"PATCH"}, route.methods)
+	t.Run("Delete", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Delete("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodDelete}, route.methods)
+	})
 
-	route = router.Delete("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"DELETE"}, route.methods)
+	t.Run("Options", func(t *testing.T) {
+		router := prepareRouterTest()
+		route := router.Options("/uri", func(_ *Response, _ *Request) {})
+		assert.Equal(t, []string{http.MethodOptions}, route.methods)
+	})
 
-	route = router.Options("/uri", func(resp *Response, r *Request) {})
-	suite.Equal([]string{"OPTIONS"}, route.methods)
-}
+	t.Run("Static", func(t *testing.T) {
+		router := prepareRouterTest()
+		f, err := fs.Sub(&osfs.FS{}, "resources")
+		require.NoError(t, err)
+		route := router.Static(fsutil.NewEmbed(f.(fs.ReadDirFS)), "/uri", false)
+		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
+		assert.Equal(t, []string{"resource"}, route.parameters)
+		assert.Equal(t, "/uri{resource:.*}", route.uri)
+	})
 
-func (suite *RouterTestSuite) TestFinalizeHijacked() {
-	recorder := &hijackableRecorder{httptest.NewRecorder()}
-	req := httptest.NewRequest(http.MethodGet, "/hijack", nil)
-	request := suite.CreateTestRequest(req)
-	resp := newResponse(recorder, req)
+	t.Run("Controller", func(t *testing.T) {
+		router := prepareRouterTest()
+		ctrl := &testController{}
+		router.Controller(ctrl)
+		assert.Equal(t, router.server, ctrl.server)
+		assert.True(t, ctrl.registered)
+	})
 
-	c, _, err := resp.Hijack()
-	if err != nil {
-		suite.Fail(err.Error())
-	}
-	defer c.Close()
+	t.Run("ServeHTTP", func(t *testing.T) {
+		router := prepareRouterTest()
+		router.server.config.Set("server.proxy.host", "proxy.io")
+		router.server.config.Set("server.proxy.protocol", "http")
+		router.server.config.Set("server.proxy.port", 80)
+		router.server.config.Set("server.proxy.base", "/base")
 
-	router := NewRouter()
-	router.finalize(resp, request)
+		var route *Route
+		route = router.Get("/route/{param}", func(r *Response, req *Request) {
+			assert.Equal(t, map[string]string{"param": "value"}, req.RouteParams)
+			assert.Equal(t, route, req.Route)
+			assert.False(t, req.Now.IsZero())
+			r.String(http.StatusOK, "hello world")
+		})
+		router.Put("/empty", func(_ *Response, _ *Request) {})
+		router.Get("/forbidden", func(r *Response, _ *Request) {
+			r.Status(http.StatusForbidden)
+		})
 
-	suite.False(resp.wroteHeader)
-}
+		router.Subrouter("/noparam").Get("", func(r *Response, req *Request) {
+			assert.Equal(t, map[string]string{}, req.RouteParams)
+			r.Status(http.StatusOK)
+		})
 
-func (suite *RouterTestSuite) TestGroup() {
-	router := NewRouter()
-	group := router.Group()
-	suite.Empty(group.prefix)
-}
+		subrouter := router.Subrouter("/subrouter/{param}")
+		subrouter.Get("/subroute", func(r *Response, req *Request) {
+			assert.Equal(t, map[string]string{"param": "value"}, req.RouteParams)
+			r.Status(http.StatusOK)
+		})
+		subrouter.Get("/subroute/{name}", func(r *Response, req *Request) {
+			assert.Equal(t, map[string]string{"param": "value", "name": "johndoe"}, req.RouteParams)
+			r.Status(http.StatusOK)
+		})
 
-func (suite *RouterTestSuite) TestGetRoutes() {
-	router := NewRouter()
-	router.Get("/test", func(r1 *Response, r2 *Request) {})
-	router.Post("/test", func(r1 *Response, r2 *Request) {})
+		router.Middleware(&testMiddleware{key: "router"})
+		router.GlobalMiddleware(&testMiddleware{key: "global"})
+		router.Get("/middleware", func(r *Response, req *Request) {
+			assert.Equal(t, []string{"global", "router", "route"}, req.Extra[extraMiddlewareOrder{}])
+			r.Status(http.StatusOK)
+		}).Middleware(&testMiddleware{key: "route"})
 
-	routes := router.GetRoutes()
-	suite.Len(routes, 2)
-	suite.NotSame(router.routes, routes)
-}
+		cases := []struct {
+			desc           string
+			requestMethod  string
+			requestURL     string
+			expectedBody   string
+			expectedStatus int
+		}{
+			{
+				desc:           "simple_param",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/route/value",
+				expectedStatus: http.StatusOK,
+				expectedBody:   "hello world",
+			},
+			{
+				desc:           "multiple_param",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/subrouter/value/subroute/johndoe",
+				expectedStatus: http.StatusOK,
+				expectedBody:   "",
+			},
+			{
+				desc:           "no_param_in_leaf",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/subrouter/value/subroute",
+				expectedStatus: http.StatusOK,
+				expectedBody:   "",
+			},
+			{
+				desc:           "no_param",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/noparam",
+				expectedStatus: http.StatusOK,
+				expectedBody:   "",
+			},
+			{
+				desc:           "protocol_rediect",
+				requestMethod:  http.MethodGet,
+				requestURL:     "https://127.0.0.1:8080/route/value?query=abc",
+				expectedStatus: http.StatusPermanentRedirect,
+				expectedBody:   "<a href=\"http://proxy.io/base/route/value?query=abc\">Permanent Redirect</a>.\n\n",
+			},
+			{
+				desc:           "empty_response",
+				requestMethod:  http.MethodPut,
+				requestURL:     "/empty",
+				expectedStatus: http.StatusNoContent,
+				expectedBody:   "",
+			},
+			{
+				desc:           "status_handler",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/forbidden",
+				expectedStatus: http.StatusForbidden,
+				expectedBody:   "{\"error\":\"Forbidden\"}\n",
+			},
+			{
+				desc:           "not_found",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/not_found",
+				expectedStatus: http.StatusNotFound,
+				expectedBody:   "{\"error\":\"Not Found\"}\n",
+			},
+			{
+				desc:           "method_not_allowed",
+				requestMethod:  http.MethodPatch,
+				requestURL:     "/empty",
+				expectedStatus: http.StatusMethodNotAllowed,
+				expectedBody:   "{\"error\":\"Method Not Allowed\"}\n",
+			},
+			{
+				desc:           "middleware_order",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/middleware",
+				expectedStatus: http.StatusOK,
+				expectedBody:   "",
+			},
+		}
 
-func (suite *RouterTestSuite) TestGetSubrouters() {
-	router := NewRouter()
-	router.Subrouter("/test")
-	router.Subrouter("/other")
+		for _, c := range cases {
+			c := c
+			t.Run(c.desc, func(t *testing.T) {
+				recorder := httptest.NewRecorder()
+				rawRequest := httptest.NewRequest(c.requestMethod, c.requestURL, nil)
+				router.ServeHTTP(recorder, rawRequest)
 
-	subrouters := router.GetSubrouters()
-	suite.Len(subrouters, 2)
-	suite.NotSame(router.subrouters, subrouters)
-}
+				res := recorder.Result()
 
-func TestRouterTestSuite(t *testing.T) {
-	RunTest(t, new(RouterTestSuite))
+				assert.Equal(t, c.expectedStatus, res.StatusCode)
+
+				body, err := io.ReadAll(res.Body)
+				assert.NoError(t, res.Body.Close())
+				require.NoError(t, err)
+				assert.Equal(t, c.expectedBody, string(body))
+			})
+		}
+	})
+
+	t.Run("match", func(t *testing.T) {
+		router := prepareRouterTest()
+
+		router.Get("/", nil).Name("root")
+		router.Get("/first-level", nil).Name("first-level")
+
+		categories := router.Subrouter("/categories")
+		categories.Get("/", nil).Name("categories.index")
+		category := categories.Subrouter("/{categoryId:[0-9]+}")
+		category.Get("/", nil).Name("categories.show")
+		category.Get("/inventory", nil).Name("categories.inventory")
+
+		// Subrouter has priority over route, this one will never match
+		router.Get("/categories/{categoryId:[0-9]+}", nil).Name("never-match")
+
+		// The first segment in the URI matches the subrouter, so this one will never match neither
+		router.Get("/categories/test", nil).Name("never-match-first-segment")
+
+		products := category.Subrouter("/products")
+		products.Get("/", nil).Name("products.index")
+		products.Post("/", nil).Name("products.create")
+		products.Get("/{id:[0-9]+}", nil).Name("products.show")
+
+		// Route groups, we should be able to match /profile even with the admins
+		// subrouter (because it has an empty prefix)
+		users := router.Subrouter("/users")
+		admins := users.Group()
+		admins.Get("/manage", nil).Name("users.admins.manage")
+		admins.Post("/", nil).Name("users.admins.create")
+		viewers := users.Group()
+		viewers.Get("/profile", nil).Name("users.viewers.profile")
+		viewers.Get("/", nil).Name("users.viewers.show")
+		users.Put("/", nil).Name("users.update")
+
+		// Conflicting subrouters
+		conflict := router.Subrouter("/conflict")
+		conflict.Get("/", nil).Name("conflict.root")
+		conflict.Get("/child", nil).Name("conflict.child")
+		conflict2 := router.Subrouter("/conflict-2")
+		conflict2.Get("/", nil).Name("conflict-2.root")
+		conflict2.Get("/child", nil).Name("conflict-2.child")
+
+		// Multiple segments in subrouter path
+		subrouter := router.Subrouter("/subrouter/{param}")
+		subrouter.Get("/", nil).Name("multiple-segments.subroute.index")
+		subrouter.Get("/subroute", nil).Name("multiple-segments.subroute.show")
+		subrouter.Get("/subroute/{name}", nil).Name("multiple-segments.subroute.name")
+
+		cases := []struct {
+			path          string
+			method        string
+			expectedRoute string
+		}{
+			{path: "/", method: http.MethodGet, expectedRoute: "root"},
+			{path: "/", method: http.MethodPost, expectedRoute: RouteMethodNotAllowed},
+			{path: "/first-level", method: http.MethodGet, expectedRoute: "first-level"},
+			{path: "/first-level/", method: http.MethodGet, expectedRoute: RouteNotFound}, // Trailing slash
+			{path: "/first-level", method: http.MethodPost, expectedRoute: RouteMethodNotAllowed},
+			{path: "/categories", method: http.MethodGet, expectedRoute: "categories.index"},
+			{path: "/categories/", method: http.MethodGet, expectedRoute: RouteNotFound}, // Trailing slash
+			{path: "/categories/123", method: http.MethodGet, expectedRoute: "categories.show"},
+			{path: "/categories/123/inventory", method: http.MethodGet, expectedRoute: "categories.inventory"},
+			{path: "/categories/test", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/categories/123/products", method: http.MethodGet, expectedRoute: "products.index"},
+			{path: "/categories/123/products", method: http.MethodPost, expectedRoute: "products.create"},
+			{path: "/categories/123/products/1234567890", method: http.MethodGet, expectedRoute: "products.show"},
+			{path: "/users/manage", method: http.MethodGet, expectedRoute: "users.admins.manage"},
+			{path: "/users/profile", method: http.MethodGet, expectedRoute: "users.viewers.profile"},
+			{path: "/users", method: http.MethodGet, expectedRoute: "users.viewers.show"}, // Method not allowed on users.admins.create
+			{path: "/users", method: http.MethodPut, expectedRoute: "users.update"},
+			{path: "/conflict", method: http.MethodGet, expectedRoute: "conflict.root"},
+			{path: "/conflict/", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/conflict/child", method: http.MethodGet, expectedRoute: "conflict.child"},
+			{path: "/conflict-2", method: http.MethodGet, expectedRoute: "conflict-2.root"},
+			{path: "/conflict-2/", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/conflict-2/child", method: http.MethodGet, expectedRoute: "conflict-2.child"},
+			{path: "/categories/123/not-a-route", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/categories/123/not-a-route/", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/subrouter/value", method: http.MethodGet, expectedRoute: "multiple-segments.subroute.index"},
+			{path: "/subrouter/value/", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/subrouter/value/subroute", method: http.MethodGet, expectedRoute: "multiple-segments.subroute.show"},
+			{path: "/subrouter/value/subroute/", method: http.MethodGet, expectedRoute: RouteNotFound},
+			{path: "/subrouter/value/subroute/johndoe", method: http.MethodGet, expectedRoute: "multiple-segments.subroute.name"},
+		}
+
+		for _, c := range cases {
+			c := c
+			t.Run(fmt.Sprintf("%s_%s", c.method, strings.ReplaceAll(c.path, "/", "_")), func(t *testing.T) {
+				match := routeMatch{currentPath: c.path}
+				router.match(c.method, &match)
+				assert.Equal(t, c.expectedRoute, match.route.name)
+			})
+		}
+
+	})
 }

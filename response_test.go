@@ -2,549 +2,36 @@ package goyave
 
 import (
 	"bufio"
-	"errors"
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strconv"
-	"strings"
+	"regexp"
 	"testing"
 
+	"github.com/samber/lo"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/database"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/slog"
+	errorutil "goyave.dev/goyave/v5/util/errors"
+	"goyave.dev/goyave/v5/util/fsutil/osfs"
 )
 
-type ResponseTestSuite struct {
-	TestSuite
-}
-
-func (suite *ResponseTestSuite) getFileSize(path string) string {
-	file, err := os.Open(path)
-	if err != nil {
-		suite.FailNow(err.Error())
-	}
-	stats, err := file.Stat()
-	if err != nil {
-		suite.FailNow(err.Error())
-	}
-	return strconv.FormatInt(stats.Size(), 10)
-}
-
-func (suite *ResponseTestSuite) TestResponseStatus() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	response.Status(403)
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(200, resp.StatusCode) // Not written yet
-	suite.True(response.empty)
-	suite.Equal(403, response.GetStatus())
-	resp.Body.Close()
-
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.String(403, "test")
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(403, resp.StatusCode)
-	suite.False(response.empty)
-	suite.Equal(403, response.GetStatus())
-	resp.Body.Close()
-
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.Status(403)
-	response.Status(200) // Should have no effect
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(200, resp.StatusCode) // Not written yet
-	suite.True(response.empty)
-	suite.Equal(403, response.GetStatus())
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestResponseHeader() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	response.Header().Set("Content-Type", "application/json")
-	response.Status(200)
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(200, resp.StatusCode)
-	suite.Equal("application/json", resp.Header.Get("Content-Type"))
-	suite.True(response.empty)
-	suite.Equal(200, response.status)
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestResponseError() {
-	config.Set("app.debug", true)
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	response.Error(fmt.Errorf("random error"))
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(500, resp.StatusCode)
-
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("{\"error\":\"random error\"}\n", string(body))
-	suite.False(response.empty)
-	suite.Equal(500, response.status)
-	suite.NotNil(response.err)
-
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.Error("random error")
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(500, resp.StatusCode)
-	suite.NotNil(response.err)
-
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("{\"error\":\"random error\"}\n", string(body))
-	suite.False(response.empty)
-	suite.Equal(500, response.status)
-	suite.NotNil(response.err)
-
-	config.Set("app.debug", false)
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.Error("random error")
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(500, response.GetStatus())
-
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Empty(string(body))
-	suite.True(response.empty)
-	suite.Equal("random error", response.GetError())
-	suite.Equal(500, response.status)
-	config.Set("app.debug", true)
-
-	// Take user-defined status code in debug mode
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.Status(503)
-	response.Error("random error")
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(503, response.GetStatus())
-
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("{\"error\":\"random error\"}\n", string(body))
-	suite.False(response.empty)
-	suite.Equal("random error", response.GetError())
-	suite.Equal(503, response.status)
-	suite.NotNil(response.err)
-}
-
-func (suite *ResponseTestSuite) TestIsEmpty() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	suite.True(response.IsEmpty())
-
-	response.String(http.StatusOK, "test")
-	suite.False(response.IsEmpty())
-}
-
-func (suite *ResponseTestSuite) TestIsHeaderWritten() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	suite.False(response.IsHeaderWritten())
-
-	response.Status(http.StatusOK)
-	suite.False(response.IsHeaderWritten())
-
-	response.String(http.StatusOK, "test")
-	suite.True(response.IsHeaderWritten())
-}
-
-func (suite *ResponseTestSuite) TestGetStacktrace() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	suite.Empty(response.GetStacktrace())
-
-	response.stacktrace = "fake stacktrace"
-	suite.Equal("fake stacktrace", response.GetStacktrace())
-}
-
-func (suite *ResponseTestSuite) TestResponseFile() {
-	size := suite.getFileSize("config/config.test.json")
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	response.File("config/config.test.json")
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(200, resp.StatusCode)
-	suite.Equal("inline", resp.Header.Get("Content-Disposition"))
-	suite.Equal("application/json", resp.Header.Get("Content-Type"))
-	suite.Equal(size, resp.Header.Get("Content-Length"))
-	suite.False(response.empty)
-	suite.Equal(200, response.status)
-	resp.Body.Close()
-
-	// Test no Content-Type override
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	response.Header().Set("Content-Type", "text/plain")
-	response.File("config/config.test.json")
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal("text/plain", resp.Header.Get("Content-Type"))
-	resp.Body.Close()
-
-	// File doesn't exist
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-	err := response.File("config/doesntexist")
-	suite.Equal("open config/doesntexist: no such file or directory", err.Error())
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(404, response.status)
-	suite.True(response.empty)
-	suite.False(response.wroteHeader)
-	suite.Empty(resp.Header.Get("Content-Type"))
-	suite.Empty(resp.Header.Get("Content-Disposition"))
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestResponseJSON() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	response.JSON(http.StatusOK, map[string]interface{}{
-		"status": "ok",
-		"code":   200,
-	})
-
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(200, resp.StatusCode)
-	suite.Equal("application/json; charset=utf-8", resp.Header.Get("Content-Type"))
-	suite.False(response.empty)
-
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
+func newTestReponse() (*Response, *httptest.ResponseRecorder) {
+	server, err := New(Options{Config: config.LoadDefault()})
 	if err != nil {
 		panic(err)
 	}
-	suite.Equal("{\"code\":200,\"status\":\"ok\"}\n", string(body))
-}
-
-func (suite *ResponseTestSuite) TestResponseDownload() {
-	size := suite.getFileSize("config/config.test.json")
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	response.Download("config/config.test.json", "config.json")
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(200, resp.StatusCode)
-	suite.Equal("attachment; filename=\"config.json\"", resp.Header.Get("Content-Disposition"))
-	suite.Equal("application/json", resp.Header.Get("Content-Type"))
-	suite.Equal(size, resp.Header.Get("Content-Length"))
-	suite.False(response.empty)
-	suite.Equal(200, response.status)
-	resp.Body.Close()
-
-	rawRequest = httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response = newResponse(httptest.NewRecorder(), rawRequest)
-
-	err := response.Download("config/doesntexist", "config.json")
-	suite.Equal("open config/doesntexist: no such file or directory", err.Error())
-	resp = response.responseWriter.(*httptest.ResponseRecorder).Result()
-	suite.Equal(404, response.status)
-	suite.True(response.empty)
-	suite.False(response.wroteHeader)
-	suite.Empty(resp.Header.Get("Content-Type"))
-	suite.Empty(resp.Header.Get("Content-Disposition"))
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestResponseRedirect() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	response.Redirect("https://www.google.com")
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(308, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("<a href=\"https://www.google.com\">Permanent Redirect</a>.\n\n", string(body))
-	suite.False(response.empty)
-	suite.Equal(308, response.status)
-}
-
-func (suite *ResponseTestSuite) TestResponseTemporaryRedirect() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-
-	response.TemporaryRedirect("https://www.google.com")
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-
-	suite.Equal(307, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("<a href=\"https://www.google.com\">Temporary Redirect</a>.\n\n", string(body))
-	suite.False(response.empty)
-	suite.Equal(307, response.status)
-}
-
-func (suite *ResponseTestSuite) TestResponseCookie() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	response.Cookie(&http.Cookie{
-		Name:  "cookie-name",
-		Value: "test",
-	})
-
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	cookies := resp.Cookies()
-	suite.Equal(1, len(cookies))
-	suite.Equal("cookie-name", cookies[0].Name)
-	suite.Equal("test", cookies[0].Value)
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestResponseWrite() {
-	rawRequest := httptest.NewRequest("GET", "/test-route", strings.NewReader("body"))
-	response := newResponse(httptest.NewRecorder(), rawRequest)
-	response.Write([]byte("byte array"))
-	resp := response.responseWriter.(*httptest.ResponseRecorder).Result()
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("byte array", string(body))
-	suite.False(response.empty)
-}
-
-func (suite *ResponseTestSuite) TestCreateTestResponse() {
+	httpReq := httptest.NewRequest(http.MethodGet, "/test", nil)
+	req := NewRequest(httpReq)
 	recorder := httptest.NewRecorder()
-	response := suite.CreateTestResponse(recorder)
-	suite.NotNil(response)
-	if response != nil {
-		suite.Equal(recorder, response.responseWriter)
-	}
-}
-
-func (suite *ResponseTestSuite) TestRender() {
-	// With map data
-	recorder := httptest.NewRecorder()
-	response := suite.CreateTestResponse(recorder)
-
-	mapData := map[string]interface{}{
-		"Status":  http.StatusNotFound,
-		"Message": "Not Found.",
-	}
-	suite.Nil(response.Render(http.StatusNotFound, "error.txt", mapData))
-	resp := recorder.Result()
-	suite.Equal(404, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("Error 404: Not Found.", string(body))
-
-	// With struct data
-	recorder = httptest.NewRecorder()
-	response = suite.CreateTestResponse(recorder)
-
-	structData := struct {
-		Message string
-		Status  int
-	}{
-		Status:  http.StatusNotFound,
-		Message: "Not Found.",
-	}
-	suite.Nil(response.Render(http.StatusNotFound, "error.txt", structData))
-	resp = recorder.Result()
-	suite.Equal(404, resp.StatusCode)
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("Error 404: Not Found.", string(body))
-	resp.Body.Close()
-
-	// Non-existing template and exec error
-	recorder = httptest.NewRecorder()
-	response = suite.CreateTestResponse(recorder)
-
-	suite.NotNil(response.Render(http.StatusNotFound, "non-existing-template", nil))
-
-	suite.NotNil(response.Render(http.StatusNotFound, "invalid.txt", nil))
-	resp = recorder.Result()
-	suite.Equal(0, response.status)
-	suite.Equal(200, resp.StatusCode) // Status not written in case of error
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestRenderHTML() {
-	// With map data
-	recorder := httptest.NewRecorder()
-	response := suite.CreateTestResponse(recorder)
-
-	mapData := map[string]interface{}{
-		"Status":  http.StatusNotFound,
-		"Message": "Not Found.",
-	}
-	suite.Nil(response.RenderHTML(http.StatusNotFound, "error.html", mapData))
-	resp := recorder.Result()
-	suite.Equal(404, resp.StatusCode)
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("<html>\n    <head></head>\n    <body>\n        <p>Error 404: Not Found.</p>\n    </body>\n</html>", string(body))
-
-	// With struct data
-	recorder = httptest.NewRecorder()
-	response = suite.CreateTestResponse(recorder)
-
-	structData := struct {
-		Message string
-		Status  int
-	}{
-		Status:  http.StatusNotFound,
-		Message: "Not Found.",
-	}
-	suite.Nil(response.RenderHTML(http.StatusNotFound, "error.html", structData))
-	resp = recorder.Result()
-	suite.Equal(404, resp.StatusCode)
-	body, err = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Nil(err)
-	suite.Equal("<html>\n    <head></head>\n    <body>\n        <p>Error 404: Not Found.</p>\n    </body>\n</html>", string(body))
-
-	// Non-existing template and exec error
-	recorder = httptest.NewRecorder()
-	response = suite.CreateTestResponse(recorder)
-
-	suite.NotNil(response.RenderHTML(http.StatusNotFound, "non-existing-template", nil))
-
-	suite.NotNil(response.RenderHTML(http.StatusNotFound, "invalid.txt", nil))
-	resp = recorder.Result()
-	suite.Equal(0, response.status)
-	suite.Equal(200, resp.StatusCode) // Status not written in case of error
-	resp.Body.Close()
-}
-
-func (suite *ResponseTestSuite) TestHandleDatabaseError() {
-	type TestRecord struct {
-		gorm.Model
-	}
-	config.Set("database.connection", "mysql")
-	defer config.Set("database.connection", "none")
-	db := database.GetConnection()
-
-	response := newResponse(httptest.NewRecorder(), nil)
-	suite.False(response.HandleDatabaseError(db.Find(&TestRecord{})))
-
-	suite.Equal(http.StatusInternalServerError, response.status)
-
-	db.AutoMigrate(&TestRecord{})
-	defer db.Migrator().DropTable(&TestRecord{})
-	response = newResponse(httptest.NewRecorder(), nil)
-
-	suite.False(response.HandleDatabaseError(db.First(&TestRecord{}, -1)))
-
-	suite.Equal(http.StatusNotFound, response.status)
-
-	response = newResponse(httptest.NewRecorder(), nil)
-	suite.True(response.HandleDatabaseError(db.Exec("SHOW TABLES;")))
-
-	suite.Equal(0, response.status)
-
-	response = newResponse(httptest.NewRecorder(), nil)
-	results := []TestRecord{}
-	suite.True(response.HandleDatabaseError(db.Find(&results))) // Get all but empty result should not be an error
-	suite.Equal(0, response.status)
-}
-
-func (suite *ResponseTestSuite) TestHead() {
-	suite.RunServer(func(router *Router) {
-		router.Route("GET|HEAD", "/test", func(response *Response, r *Request) {
-			response.String(http.StatusOK, "hello world")
-		})
-	}, func() {
-		resp, err := suite.Request("HEAD", "/test", nil, nil)
-		if err != nil {
-			suite.Fail(err.Error())
-		}
-		defer resp.Body.Close()
-
-		body := suite.GetBody(resp)
-		suite.Equal(http.StatusOK, resp.StatusCode)
-		suite.Equal("text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
-		suite.Empty(body)
-	})
-
-	suite.RunServer(func(router *Router) {
-		router.Route("GET", "/test", func(response *Response, r *Request) {
-			response.String(http.StatusOK, "hello world")
-		})
-	}, func() {
-		resp, err := suite.Request("HEAD", "/test", nil, nil)
-		if err != nil {
-			suite.Fail(err.Error())
-		}
-		defer resp.Body.Close()
-
-		body := suite.GetBody(resp)
-		suite.Equal(http.StatusOK, resp.StatusCode)
-		suite.Equal("text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
-		suite.Empty(body)
-	})
-
-	suite.RunServer(func(router *Router) {
-		router.Route("POST", "/test", func(response *Response, r *Request) {
-			response.String(http.StatusOK, "hello world")
-		})
-	}, func() {
-		resp, err := suite.Request("HEAD", "/test", nil, nil)
-		if err != nil {
-			suite.Fail(err.Error())
-		}
-		defer resp.Body.Close()
-
-		body := suite.GetBody(resp)
-		suite.Equal(http.StatusMethodNotAllowed, resp.StatusCode)
-		suite.Equal("application/json; charset=utf-8", resp.Header.Get("Content-Type"))
-		suite.Empty(body)
-	})
-
-	suite.RunServer(func(router *Router) {
-		router.Route("HEAD", "/test", func(response *Response, r *Request) {
-			response.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			response.Status(http.StatusOK)
-		})
-		router.Route("GET", "/test", func(response *Response, r *Request) {
-			response.String(http.StatusOK, "hello world")
-		})
-	}, func() {
-		resp, err := suite.Request("HEAD", "/test", nil, nil)
-		if err != nil {
-			suite.Fail(err.Error())
-		}
-		defer resp.Body.Close()
-
-		body := suite.GetBody(resp)
-		suite.Equal(http.StatusOK, resp.StatusCode)
-		suite.Equal("text/plain; charset=utf-8", resp.Header.Get("Content-Type"))
-		suite.Empty(body)
-	})
+	resp := NewResponse(server, req, recorder)
+	return resp, recorder
 }
 
 type hijackableRecorder struct {
@@ -556,119 +43,462 @@ func (r *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 	return conn, bufio.NewReadWriter(bufio.NewReader(conn), bufio.NewWriter(conn)), nil
 }
 
-func (suite *ResponseTestSuite) TestHijack() {
-	recorder := &hijackableRecorder{httptest.NewRecorder()}
-	req := httptest.NewRequest(http.MethodGet, "/hijack", nil)
-	resp := newResponse(recorder, req)
-
-	suite.False(resp.hijacked)
-	suite.False(resp.Hijacked())
-
-	c, b, err := resp.Hijack()
-	if err != nil {
-		suite.Fail(err.Error())
-	}
-	defer c.Close()
-
-	suite.Nil(err)
-	suite.NotNil(c)
-	suite.NotNil(b)
-	suite.True(resp.hijacked)
-	suite.True(resp.Hijacked())
-
+type testChainedWriter struct {
+	*httptest.ResponseRecorder
+	prewritten []byte
+	closed     bool
 }
 
-func (suite *ResponseTestSuite) TestErrorOnHijacked() {
-	recorder := &hijackableRecorder{httptest.NewRecorder()}
-	req := httptest.NewRequest(http.MethodGet, "/hijack", nil)
-	resp := newResponse(recorder, req)
-
-	c, _, _ := resp.Hijack()
-	defer c.Close()
-
-	suite.Nil(resp.error("test error"))
-	res := recorder.Result()
-	defer res.Body.Close()
-	suite.Equal(http.StatusInternalServerError, resp.status)
-
-	body, err := io.ReadAll(res.Body)
-	suite.Nil(err)
-	suite.Empty(body)
+func (r *testChainedWriter) PreWrite(b []byte) {
+	r.prewritten = b
 }
 
-func (suite *ResponseTestSuite) TestHijackNotHijackable() {
-	recorder := httptest.NewRecorder()
-
-	req := httptest.NewRequest(http.MethodGet, "/hijack", nil)
-	resp := newResponse(recorder, req)
-
-	c, b, err := resp.Hijack()
-	suite.Nil(c)
-	suite.Nil(b)
-	suite.NotNil(err)
-	suite.True(errors.Is(err, ErrNotHijackable))
+func (r *testChainedWriter) Close() error {
+	r.closed = true
+	return nil
 }
 
-// ------------------------
+func TestResponse(t *testing.T) {
 
-type testWriter struct {
-	io.Writer
-	result *string
-	id     string
-	closed bool
-}
+	t.Run("NewResponse", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		assert.NotNil(t, resp.server)
+		assert.NotNil(t, resp.request)
+		assert.NotNil(t, resp.writer)
+		assert.NotNil(t, resp.responseWriter)
+		assert.Equal(t, resp.writer, resp.responseWriter)
+		assert.True(t, resp.empty)
+		assert.Equal(t, 0, resp.status)
+		assert.False(t, resp.wroteHeader)
+	})
 
-func (w *testWriter) Write(b []byte) (int, error) {
-	*w.result += w.id + string(b)
-	return w.Writer.Write(b)
-}
+	t.Run("Status", func(t *testing.T) {
+		// The status header should not be written right away when
+		// defining the status.
+		resp, recorder := newTestReponse()
+		resp.Status(http.StatusForbidden)
+		assert.Equal(t, http.StatusForbidden, resp.status)
+		assert.Equal(t, http.StatusForbidden, resp.GetStatus())
+		assert.False(t, resp.wroteHeader)
 
-func (w *testWriter) Close() error {
-	w.closed = true
-	return fmt.Errorf("Test close error")
-}
+		// Can't override status once defined
+		resp.Status(http.StatusOK)
+		assert.Equal(t, http.StatusForbidden, resp.status)
 
-func (suite *ResponseTestSuite) TestChainedWriter() {
-	writer := httptest.NewRecorder()
-	response := newResponse(writer, nil)
-	result := ""
-	testWr := &testWriter{response.Writer(), &result, "0", false}
-	response.SetWriter(testWr)
+		// Header not written
+		res := recorder.Result()
+		require.NoError(t, res.Body.Close())
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+	})
 
-	response.String(http.StatusOK, "hello world")
+	t.Run("WriteHeader", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		resp.WriteHeader(http.StatusNoContent)
 
-	suite.Equal("0hello world", result)
-	suite.Equal(200, response.status)
-	suite.True(response.wroteHeader)
-	suite.False(response.empty)
+		res := recorder.Result()
+		require.NoError(t, res.Body.Close())
+		assert.Equal(t, http.StatusNoContent, resp.status)
+		assert.True(t, resp.wroteHeader)
+		assert.True(t, resp.IsHeaderWritten())
+		assert.Equal(t, http.StatusNoContent, res.StatusCode)
 
-	suite.Equal("Test close error", response.close().Error())
-	suite.True(testWr.closed)
+		// Cannot rewrite header
+		resp.WriteHeader(http.StatusForbidden)
+		assert.Equal(t, http.StatusNoContent, resp.status)
+	})
 
-	resp := writer.Result()
-	body, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Equal("hello world", string(body))
+	t.Run("Header", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		resp.Header().Set("X-Test", "value")
+		resp.WriteHeader(http.StatusOK)
 
-	// Test double chained writer
-	writer = httptest.NewRecorder()
-	response = newResponse(writer, nil)
-	result = ""
-	testWr = &testWriter{response.Writer(), &result, "0", false}
-	testWr2 := &testWriter{testWr, &result, "1", false}
-	response.SetWriter(testWr2)
+		res := recorder.Result()
+		require.NoError(t, res.Body.Close())
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "value", res.Header.Get("X-Test"))
+	})
 
-	response.String(http.StatusOK, "hello world")
-	suite.Equal("1hello world0hello world", result)
-	suite.Equal(200, response.status)
-	suite.True(response.wroteHeader)
-	suite.False(response.empty)
-	resp = writer.Result()
-	body, _ = io.ReadAll(resp.Body)
-	resp.Body.Close()
-	suite.Equal("hello world", string(body))
-}
+	t.Run("IsEmpty", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		resp.Status(http.StatusOK)
+		assert.True(t, resp.IsEmpty())
+		resp.WriteHeader(http.StatusOK)
+		assert.True(t, resp.IsEmpty())
+		_, _ = resp.Write([]byte("hello"))
+		assert.False(t, resp.IsEmpty())
+	})
 
-func TestResponseTestSuite(t *testing.T) {
-	RunTest(t, new(ResponseTestSuite))
+	t.Run("File", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+
+		resp.File(&osfs.FS{}, "resources/test_file.txt")
+		res := recorder.Result()
+
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "inline", res.Header.Get("Content-Disposition"))
+		assert.Equal(t, "25", res.Header.Get("Content-Length"))
+		assert.Equal(t, "text/plain; charset=utf-8", res.Header.Get("Content-Type"))
+
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+
+		// utf-8 BOM + text content
+		assert.Equal(t, append([]byte{0xef, 0xbb, 0xbf}, []byte("utf-8 with BOM content")...), body)
+
+		t.Run("not_found", func(t *testing.T) {
+			resp, _ := newTestReponse()
+			resp.File(&osfs.FS{}, "not_a_file")
+			assert.Equal(t, http.StatusNotFound, resp.status)
+		})
+	})
+
+	t.Run("Download", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+
+		resp.Download(&osfs.FS{}, "resources/test_file.txt", "test_file.txt")
+		res := recorder.Result()
+
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "attachment; filename=\"test_file.txt\"", res.Header.Get("Content-Disposition"))
+		assert.Equal(t, "25", res.Header.Get("Content-Length"))
+		assert.Equal(t, "text/plain; charset=utf-8", res.Header.Get("Content-Type"))
+
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+
+		// utf-8 BOM + text content
+		assert.Equal(t, append([]byte{0xef, 0xbb, 0xbf}, []byte("utf-8 with BOM content")...), body)
+
+		t.Run("not_found", func(t *testing.T) {
+			resp, _ := newTestReponse()
+			resp.Download(&osfs.FS{}, "not_a_file", "file.txt")
+			assert.Equal(t, http.StatusNotFound, resp.status)
+		})
+	})
+
+	t.Run("JSON", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		resp.JSON(http.StatusOK, map[string]any{"hello": "world"})
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "application/json; charset=utf-8", res.Header.Get("Content-Type"))
+		assert.Equal(t, "{\"hello\":\"world\"}\n", string(body))
+	})
+
+	t.Run("JSON_error", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		assert.Panics(t, func() {
+			resp.JSON(http.StatusOK, make(chan struct{}))
+		})
+	})
+
+	t.Run("String", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		resp.String(http.StatusOK, "hello world")
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "hello world", string(body))
+	})
+
+	t.Run("Cookie", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		resp.Cookie(&http.Cookie{
+			Name:  "cookie-name",
+			Value: "test",
+		})
+
+		res := recorder.Result()
+		require.NoError(t, res.Body.Close())
+		cookies := res.Cookies()
+		require.Len(t, cookies, 1)
+		assert.Equal(t, "cookie-name", cookies[0].Name)
+		assert.Equal(t, "test", cookies[0].Value)
+	})
+
+	t.Run("Write", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		_, _ = resp.Write([]byte("hello world"))
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.status) // Ensures PreWrite has been called
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "hello world", string(body))
+	})
+
+	t.Run("Hijack", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		resp.responseWriter = &hijackableRecorder{httptest.NewRecorder()}
+
+		assert.False(t, resp.hijacked)
+		assert.False(t, resp.Hijacked())
+
+		c, b, err := resp.Hijack()
+		require.NoError(t, err)
+		assert.NotNil(t, c)
+		assert.NotNil(t, b)
+		assert.True(t, resp.hijacked)
+		assert.True(t, resp.Hijacked())
+
+		t.Run("not_hijackable", func(t *testing.T) {
+			resp, _ := newTestReponse()
+
+			c, b, err := resp.Hijack()
+			require.ErrorIs(t, err, ErrNotHijackable)
+			assert.Nil(t, c)
+			assert.Nil(t, b)
+		})
+
+		t.Run("error_on_hijack", func(t *testing.T) {
+			resp, _ := newTestReponse()
+			resp.server.config.Set("app.debug", true)
+			resp.server.Logger = slog.New(slog.NewHandler(false, &bytes.Buffer{}))
+			recorder := httptest.NewRecorder()
+			resp.responseWriter = &hijackableRecorder{recorder}
+
+			_, _, err := resp.Hijack()
+			require.NoError(t, err)
+
+			resp.Error(fmt.Errorf("test error"))
+			res := recorder.Result()
+			defer func() {
+				assert.NoError(t, res.Body.Close())
+			}()
+			assert.Equal(t, http.StatusInternalServerError, resp.status)
+
+			body, err := io.ReadAll(res.Body)
+			require.NoError(t, err)
+
+			// The connection was hijacked so errors shouldn't be written to the response
+			assert.Empty(t, body)
+		})
+	})
+
+	t.Run("SetWriter", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		newWriter := &bytes.Buffer{}
+		resp.SetWriter(newWriter)
+		assert.Equal(t, newWriter, resp.Writer())
+	})
+
+	t.Run("Chained_writer", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		newWriter := &testChainedWriter{}
+		resp.SetWriter(newWriter)
+
+		resp.PreWrite([]byte{1, 2, 3})
+		assert.Equal(t, []byte{1, 2, 3}, newWriter.prewritten)
+		require.NoError(t, resp.close())
+		assert.True(t, newWriter.closed)
+	})
+
+	t.Run("Error_no_debug", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		logBuffer := &bytes.Buffer{}
+		resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+		resp.server.config.Set("app.debug", false)
+		err := fmt.Errorf("custom error")
+		resp.Error(err)
+
+		e := resp.GetError()
+		if !assert.NotNil(t, e) {
+			return
+		}
+		assert.Equal(t, []error{err}, e.Unwrap())
+		assert.Equal(t, http.StatusInternalServerError, resp.status)
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n`,
+				regexp.QuoteMeta(e.Error()), regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String())))),
+			)),
+			logBuffer.String(),
+		)
+	})
+
+	t.Run("Error_no_debug_nil", func(t *testing.T) {
+		resp, _ := newTestReponse()
+		logBuffer := &bytes.Buffer{}
+		resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+		resp.server.config.Set("app.debug", false)
+		resp.Error(nil)
+
+		e := resp.GetError()
+		assert.Nil(t, e)
+		assert.Equal(t, http.StatusInternalServerError, resp.status)
+	})
+
+	t.Run("Error_with_debug", func(t *testing.T) {
+		cases := []struct {
+			expectedLog     func(e *errorutil.Error) *regexp.Regexp
+			err             any
+			expectedMessage string
+		}{
+			{err: fmt.Errorf("custom error"), expectedMessage: `"custom error"`, expectedLog: func(e *errorutil.Error) *regexp.Regexp {
+				return regexp.MustCompile(
+					fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n`,
+						regexp.QuoteMeta(e.Error()), regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String())))),
+					))
+			}},
+			{err: map[string]any{"key": "value"}, expectedMessage: `{"key":"value"}`, expectedLog: func(e *errorutil.Error) *regexp.Regexp {
+				return regexp.MustCompile(
+					fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s,"reason":{"key":"value"}}\n`,
+						regexp.QuoteMeta(e.Error()), regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String())))),
+					))
+			}},
+			{err: []error{fmt.Errorf("custom error 1"), fmt.Errorf("custom error 2")}, expectedMessage: `["custom error 1","custom error 2"]`, expectedLog: func(e *errorutil.Error) *regexp.Regexp {
+				reasons := e.Unwrap()
+				stacktrace := regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String()))))
+				return regexp.MustCompile(
+					fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n`,
+						regexp.QuoteMeta(reasons[0].Error()), stacktrace,
+						regexp.QuoteMeta(reasons[1].Error()), stacktrace,
+					),
+				)
+			}},
+			{err: nil, expectedMessage: `null`, expectedLog: func(_ *errorutil.Error) *regexp.Regexp {
+				return regexp.MustCompile(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"<nil>"}\n`)
+			}},
+		}
+
+		for _, c := range cases {
+			c := c
+			resp, recorder := newTestReponse()
+			logBuffer := &bytes.Buffer{}
+			resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+			resp.server.config.Set("app.debug", true)
+			resp.Error(c.err)
+
+			e := resp.GetError()
+			switch c.err {
+			case nil:
+				if !assert.Nil(t, e) {
+					return
+				}
+			default:
+				if !assert.NotNil(t, e) {
+					return
+				}
+			}
+			assert.Equal(t, http.StatusInternalServerError, resp.status)
+
+			res := recorder.Result()
+			body, err := io.ReadAll(res.Body)
+			assert.NoError(t, res.Body.Close())
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusInternalServerError, resp.status)
+			assert.Equal(t, http.StatusInternalServerError, res.StatusCode)
+			assert.Equal(t, "application/json; charset=utf-8", res.Header.Get("Content-Type"))
+			assert.Equal(t, "{\"error\":"+c.expectedMessage+"}\n", string(body))
+
+			assert.Regexp(t, c.expectedLog(e), logBuffer.String())
+		}
+	})
+
+	t.Run("Error_with_debug_and_custom_status", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		logBuffer := &bytes.Buffer{}
+		resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+		resp.server.config.Set("app.debug", true)
+		err := fmt.Errorf("custom error")
+		resp.Status(http.StatusForbidden)
+		resp.Error(err)
+
+		e := resp.GetError()
+		if !assert.NotNil(t, e) {
+			return
+		}
+		assert.Equal(t, []error{err}, e.Unwrap())
+		assert.Equal(t, http.StatusForbidden, resp.status)
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.status)
+		assert.Equal(t, http.StatusForbidden, res.StatusCode)
+		assert.Equal(t, "application/json; charset=utf-8", res.Header.Get("Content-Type"))
+		assert.Equal(t, "{\"error\":\"custom error\"}\n", string(body))
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n`,
+				regexp.QuoteMeta(e.Error()), regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String())))),
+			)),
+			logBuffer.String(),
+		)
+	})
+
+	t.Run("Error_with_debug_and_not_empty", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		logBuffer := &bytes.Buffer{}
+		resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+		resp.server.config.Set("app.debug", true)
+		err := fmt.Errorf("custom error")
+		resp.String(http.StatusForbidden, "forbidden")
+		resp.Error(err)
+
+		e := resp.GetError()
+		if !assert.NotNil(t, e) {
+			return
+		}
+		assert.Equal(t, []error{err}, e.Unwrap())
+		assert.Equal(t, http.StatusForbidden, resp.status)
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusForbidden, resp.status)
+		assert.Equal(t, http.StatusForbidden, res.StatusCode)
+		assert.Equal(t, "forbidden", string(body))
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"ERROR","source":{"function":".+","file":".+","line":\d+},"msg":"%s","trace":%s}\n`,
+				regexp.QuoteMeta(e.Error()), regexp.QuoteMeta(string(lo.Must(json.Marshal(e.StackFrames().String())))),
+			)),
+			logBuffer.String(),
+		)
+	})
+
+	t.Run("WriteDBError", func(t *testing.T) {
+
+		t.Run("ErrRecordNotFound", func(t *testing.T) {
+			resp, _ := newTestReponse()
+			assert.True(t, resp.WriteDBError(fmt.Errorf("%w", gorm.ErrRecordNotFound)))
+			assert.Equal(t, http.StatusNotFound, resp.status)
+		})
+
+		t.Run("DBError", func(t *testing.T) {
+			resp, recorder := newTestReponse()
+			logBuffer := &bytes.Buffer{}
+			resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+			assert.True(t, resp.WriteDBError(fmt.Errorf("random db error")))
+
+			res := recorder.Result()
+			body, err := io.ReadAll(res.Body)
+			assert.NoError(t, res.Body.Close())
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusInternalServerError, resp.status)
+			assert.Equal(t, http.StatusInternalServerError, res.StatusCode)
+			assert.Equal(t, "application/json; charset=utf-8", res.Header.Get("Content-Type"))
+			assert.Equal(t, "{\"error\":\"random db error\"}\n", string(body))
+		})
+
+		t.Run("no_error", func(t *testing.T) {
+			resp, _ := newTestReponse()
+			assert.False(t, resp.WriteDBError(nil))
+		})
+
+	})
+
 }

@@ -5,17 +5,17 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/http/httptest"
-	"os"
+	"regexp"
 	"testing"
 	"time"
 
-	"goyave.dev/goyave/v4"
+	"github.com/samber/lo"
+	"github.com/stretchr/testify/assert"
+	"goyave.dev/goyave/v5"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/slog"
+	"goyave.dev/goyave/v5/util/testutil"
 )
-
-type LogMiddlewareTestSuite struct {
-	goyave.TestSuite
-}
 
 type testWriter struct {
 	io.Writer
@@ -32,105 +32,256 @@ func (w *testWriter) PreWrite(b []byte) {
 
 func (w *testWriter) Close() error {
 	w.closed = true
-	return fmt.Errorf("Test close error")
+	return nil
 }
 
-func (suite *LogMiddlewareTestSuite) TestNewWriter() {
-	now := time.Now()
-	recorder := httptest.NewRecorder()
-	response := suite.CreateTestResponse(recorder)
-	request := suite.CreateTestRequest(httptest.NewRequest("GET", "/log", nil))
-	writer := NewWriter(response, request, CommonLogFormatter)
+func TestWriter(t *testing.T) {
 
-	suite.Equal(now.Format("2006-01-02T15:04"), writer.now.Format("2006-01-02T15:04"))
-	suite.Equal(request, writer.request)
-	suite.Equal(response, writer.response)
-	suite.Equal(recorder, writer.writer)
-}
+	t.Run("Write", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		resp, recorder := server.NewTestResponse(req)
 
-func (suite *LogMiddlewareTestSuite) TestCommonWrite() {
-	buffer := bytes.NewBufferString("")
-	goyave.AccessLogger.SetOutput(buffer)
-	defer func() {
-		goyave.AccessLogger.SetOutput(os.Stdout)
-	}()
+		writer := NewWriter(server.Server, resp, req, CommonLogFormatter)
+		resp.SetWriter(writer)
 
-	now := time.Now()
-	request := suite.CreateTestRequest(httptest.NewRequest("GET", "/log", nil))
+		i, err := resp.Write([]byte("body response"))
+		assert.Equal(t, 13, i)
+		assert.Equal(t, 13, writer.length)
+		assert.NoError(t, err)
 
-	result := suite.Middleware(CommonLogMiddleware(), request, func(response *goyave.Response, request *goyave.Request) {
-		response.Writer().(*Writer).now = now
-		response.String(http.StatusOK, "message")
+		assert.NoError(t, writer.Close())
+		httpResponse := recorder.Result()
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s","details":{"host":"192\.0\.2\.1","username":"-","time":"2020-03-23T13:58:26\.371Z","method":"GET","uri":"/log","proto":"HTTP/1\.1","status":200,"length":13}}\n`,
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 13`),
+			)),
+			buffer.String(),
+		)
 	})
 
-	suite.Equal(200, result.StatusCode)
+	t.Run("Write_dev_mode", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		resp, recorder := server.NewTestResponse(req)
 
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal("message", string(body))
+		writer := NewWriter(server.Server, resp, req, CommonLogFormatter)
+		resp.SetWriter(writer)
 
-	suite.Equal("192.0.2.1 - - ["+now.Format(TimestampFormat)+"] \"GET \"/log\" HTTP/1.1\" 200 7\n", buffer.String())
-}
+		i, err := resp.Write([]byte("body response"))
+		assert.Equal(t, 13, i)
+		assert.Equal(t, 13, writer.length)
+		assert.NoError(t, err)
 
-func (suite *LogMiddlewareTestSuite) TestCombinedWrite() {
-	buffer := bytes.NewBufferString("")
-	goyave.AccessLogger.SetOutput(buffer)
-	defer func() {
-		goyave.AccessLogger.SetOutput(os.Stdout)
-	}()
+		assert.NoError(t, writer.Close())
+		httpResponse := recorder.Result()
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
 
-	now := time.Now()
-	request := suite.CreateTestRequest(httptest.NewRequest("GET", "/log", nil))
-	referrer := "http://example.com"
-	userAgent := "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:74.0) Gecko/20100101 Firefox/74.0"
-	request.Header().Set("Referer", referrer)
-	request.Header().Set("User-Agent", userAgent)
-
-	result := suite.Middleware(CombinedLogMiddleware(), request, func(response *goyave.Response, request *goyave.Request) {
-		response.Writer().(*Writer).now = now
-		response.String(http.StatusOK, "message")
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s","details":{"host":"192\.0\.2\.1","username":"-","time":"2020-03-23T13:58:26\.371Z","method":"GET","uri":"/log","proto":"HTTP/1\.1","status":200,"length":13}}\n`,
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 13`),
+			)),
+			buffer.String(),
+		)
 	})
 
-	suite.Equal(200, result.StatusCode)
+	t.Run("child_writer_prewrite_and_close", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		resp, recorder := server.NewTestResponse(req)
 
-	body, err := io.ReadAll(result.Body)
-	if err != nil {
-		panic(err)
-	}
-	result.Body.Close()
-	suite.Equal("message", string(body))
-
-	suite.Equal("192.0.2.1 - - ["+now.Format(TimestampFormat)+"] \"GET \"/log\" HTTP/1.1\" 200 7 \""+referrer+"\" \""+userAgent+"\"\n", buffer.String())
-}
-
-func (suite *LogMiddlewareTestSuite) TestCloseChildWriter() {
-	closeableWriter := &testWriter{closed: false}
-	suite.RunServer(func(router *goyave.Router) {
-		router.Middleware(func(next goyave.Handler) goyave.Handler {
-			return func(response *goyave.Response, r *goyave.Request) {
-				closeableWriter.Writer = response.Writer()
-				response.SetWriter(closeableWriter)
-				next(response, r)
-			}
-		})
-		router.Middleware(CombinedLogMiddleware())
-		router.Route("GET", "/test", func(response *goyave.Response, request *goyave.Request) {
-			response.String(http.StatusOK, "message")
-		})
-	}, func() {
-		resp, err := suite.Get("/test", nil)
-		if err != nil {
-			suite.Fail(err.Error())
+		child := &testWriter{
+			preWritten: false,
+			closed:     false,
+			Writer:     resp.Writer(),
 		}
-		resp.Body.Close()
-		suite.True(closeableWriter.closed)
-		suite.True(closeableWriter.preWritten)
+		resp.SetWriter(child)
+		writer := NewWriter(server.Server, resp, req, CommonLogFormatter)
+		resp.SetWriter(writer)
+
+		i, err := resp.Write([]byte("body response"))
+		assert.True(t, child.preWritten)
+		assert.Equal(t, 13, i)
+		assert.Equal(t, 13, writer.length)
+		assert.NoError(t, err)
+
+		assert.NoError(t, writer.Close())
+		httpResponse := recorder.Result()
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s","details":{"host":"192\.0\.2\.1","username":"-","time":"2020-03-23T13:58:26\.371Z","method":"GET","uri":"/log","proto":"HTTP/1\.1","status":200,"length":13}}\n`,
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 13`),
+			)),
+			buffer.String(),
+		)
+		assert.True(t, child.closed)
+	})
+
+	t.Run("child_writer_prewrite_and_close_dev_mode", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", true)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		resp, recorder := server.NewTestResponse(req)
+
+		child := &testWriter{
+			preWritten: false,
+			closed:     false,
+			Writer:     resp.Writer(),
+		}
+		resp.SetWriter(child)
+		writer := NewWriter(server.Server, resp, req, CommonLogFormatter)
+		resp.SetWriter(writer)
+
+		i, err := resp.Write([]byte("body response"))
+		assert.True(t, child.preWritten)
+		assert.Equal(t, 13, i)
+		assert.Equal(t, 13, writer.length)
+		assert.NoError(t, err)
+
+		assert.NoError(t, writer.Close())
+		httpResponse := recorder.Result()
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s"}\n`, // Same thing but details are omitted
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 13`),
+			)),
+			buffer.String(),
+		)
+		assert.True(t, child.closed)
 	})
 }
 
-func TestLogMiddlewareSuite(t *testing.T) {
-	goyave.RunTest(t, new(LogMiddlewareTestSuite))
+func TestMiddleware(t *testing.T) {
+
+	t.Run("Common", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		httpResponse := server.TestMiddleware(CommonLogMiddleware(), req, func(r *goyave.Response, _ *goyave.Request) {
+			r.String(http.StatusOK, "hello world")
+		})
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s","details":{"host":"192\.0\.2\.1","username":"-","time":"2020-03-23T13:58:26\.371Z","method":"GET","uri":"/log","proto":"HTTP/1\.1","status":200,"length":11}}\n`,
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 11`),
+			)),
+			buffer.String(),
+		)
+	})
+
+	t.Run("Common_dev_mode", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", true)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+		httpResponse := server.TestMiddleware(CommonLogMiddleware(), req, func(r *goyave.Response, _ *goyave.Request) {
+			r.String(http.StatusOK, "hello world")
+		})
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s"}\n`, // Same thing but details are omitted
+				regexp.QuoteMeta(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 11`),
+			)),
+			buffer.String(),
+		)
+	})
+
+	t.Run("Combined", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg})
+		buffer := bytes.NewBufferString("")
+		server.Logger = slog.New(slog.NewHandler(false, buffer))
+
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+
+		referrer := "http://example.com"
+		userAgent := "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:74.0) Gecko/20100101 Firefox/74.0"
+		req.Header().Set("Referer", referrer)
+		req.Header().Set("User-Agent", userAgent)
+
+		httpResponse := server.TestMiddleware(CombinedLogMiddleware(), req, func(r *goyave.Response, _ *goyave.Request) {
+			r.String(http.StatusOK, "hello world")
+		})
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s","details":{"host":"192\.0\.2\.1","username":"-","time":"2020-03-23T13:58:26\.371Z","method":"GET","uri":"/log","proto":"HTTP/1\.1","status":200,"length":11,"referrer":"%s","userAgent":"%s"}}\n`,
+				regexp.QuoteMeta(fmt.Sprintf(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 11 \"%s\" \"%s\"`, referrer, userAgent)),
+				regexp.QuoteMeta(referrer),
+				regexp.QuoteMeta(userAgent),
+			)),
+			buffer.String(),
+		)
+	})
+
+	t.Run("Combined_dev_mode", func(t *testing.T) {
+		ts := lo.Must(time.Parse(time.RFC3339, "2020-03-23T13:58:26.371Z"))
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", true)
+		buffer := bytes.NewBufferString("")
+		server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg, Logger: slog.New(slog.NewHandler(false, buffer))})
+
+		req := server.NewTestRequest(http.MethodGet, "/log", nil)
+		req.Now = ts
+
+		referrer := "http://example.com"
+		userAgent := "Mozilla/5.0 (X11; Ubuntu; Linux x86_64; rv:74.0) Gecko/20100101 Firefox/74.0"
+		req.Header().Set("Referer", referrer)
+		req.Header().Set("User-Agent", userAgent)
+
+		httpResponse := server.TestMiddleware(CombinedLogMiddleware(), req, func(r *goyave.Response, _ *goyave.Request) {
+			r.String(http.StatusOK, "hello world")
+		})
+		_ = httpResponse.Body.Close()
+		assert.Equal(t, http.StatusOK, httpResponse.StatusCode)
+
+		assert.Regexp(t, regexp.MustCompile(
+			fmt.Sprintf(`{"time":"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{1,9}((\+\d{2}:\d{2})|Z)?","level":"INFO","source":{"function":".+","file":".+","line":\d+},"msg":"%s"}\n`, // Same thing but details are omitted
+				regexp.QuoteMeta(fmt.Sprintf(`192.0.2.1 - - [23/Mar/2020:13:58:26 +0000] \"GET \"/log\" HTTP/1.1\" 200 11 \"%s\" \"%s\"`, referrer, userAgent)),
+			)),
+			buffer.String(),
+		)
+	})
 }

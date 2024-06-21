@@ -1,289 +1,304 @@
 package goyave
 
 import (
+	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"regexp"
 	"testing"
 
-	"goyave.dev/goyave/v4/validation"
+	"github.com/stretchr/testify/assert"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/cors"
+	"goyave.dev/goyave/v5/validation"
 )
 
-type RouteTestSuite struct {
-	TestSuite
+func prepareRouteTest() *Router {
+	server, err := New(Options{Config: config.LoadDefault()})
+	if err != nil {
+		panic(err)
+	}
+	return NewRouter(server)
 }
 
-func (suite *RouteTestSuite) TestNewRoute() {
-	route := newRoute(func(resp *Response, r *Request) {})
-	suite.NotNil(route)
-	suite.NotNil(route.handler)
+func routeTestValidationRules(_ *Request) validation.RuleSet {
+	return validation.RuleSet{
+		{Path: "field", Rules: validation.List{
+			validation.Required(),
+		}},
+	}
 }
 
-func (suite *RouteTestSuite) TestMakeParameters() {
-	regexCache := make(map[string]*regexp.Regexp, 5)
-	route := newRoute(func(resp *Response, r *Request) {})
-	route.compileParameters("/product/{id:[0-9]+}", true, regexCache)
-	suite.Equal([]string{"id"}, route.parameters)
-	suite.NotNil(route.regex)
-	suite.True(route.regex.MatchString("/product/666"))
-	suite.False(route.regex.MatchString("/product/"))
-	suite.False(route.regex.MatchString("/product/qwerty"))
-}
+func TestRoute(t *testing.T) {
 
-func (suite *RouteTestSuite) TestMatch() {
-	regexCache := make(map[string]*regexp.Regexp, 5)
-	handler := func(resp *Response, r *Request) {
-		resp.String(http.StatusOK, "Success")
-	}
-	route := &Route{
-		name:            "test-route",
-		uri:             "/product/{id:[0-9]+}",
-		methods:         []string{"GET", "POST"},
-		parent:          nil,
-		handler:         handler,
-		validationRules: nil,
-	}
-	route.compileParameters(route.uri, true, regexCache)
+	t.Run("Name", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := &Route{parent: router}
+		route.Name("route-name")
+		assert.Equal(t, "route-name", route.name)
+		assert.Equal(t, router.namedRoutes["route-name"], route)
 
-	rawRequest := httptest.NewRequest("GET", "/product/33", nil)
-	match := routeMatch{currentPath: rawRequest.URL.Path}
-	suite.True(route.match(rawRequest, &match))
-	suite.Equal("33", match.parameters["id"])
+		t.Run("already_set", func(t *testing.T) {
+			router := prepareRouteTest()
+			route := &Route{parent: router, name: "route-name"}
+			assert.Panics(t, func() {
+				route.Name("route-rename")
+			})
+		})
 
-	rawRequest = httptest.NewRequest("POST", "/product/33", nil)
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.True(route.match(rawRequest, &match))
-	suite.Equal("33", match.parameters["id"])
-
-	rawRequest = httptest.NewRequest("PUT", "/product/33", nil)
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.False(route.match(rawRequest, &match))
-	suite.Equal(errMatchMethodNotAllowed, match.err)
-
-	// Test error has not been overridden
-	rawRequest = httptest.NewRequest("PUT", "/product/test", nil)
-	suite.False(route.match(rawRequest, &match))
-	suite.Equal(errMatchMethodNotAllowed, match.err)
-
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.False(route.match(rawRequest, &match))
-	suite.Equal(errMatchNotFound, match.err)
-
-	route = &Route{
-		name:            "test-route",
-		uri:             "/product/{id:[0-9]+}/{name}",
-		methods:         []string{"GET"},
-		parent:          nil,
-		handler:         handler,
-		validationRules: nil,
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	rawRequest = httptest.NewRequest("GET", "/product/666/test", nil)
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.True(route.match(rawRequest, &match))
-	suite.Equal("666", match.parameters["id"])
-	suite.Equal("test", match.parameters["name"])
-
-	route = &Route{
-		name:            "test-route",
-		uri:             "/categories/{category}/{sort:(?:asc|desc|new)}",
-		methods:         []string{"GET"},
-		parent:          nil,
-		handler:         handler,
-		validationRules: nil,
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	rawRequest = httptest.NewRequest("GET", "/categories/lawn-mower/asc", nil)
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.True(route.match(rawRequest, &match))
-	suite.Equal("lawn-mower", match.parameters["category"])
-	suite.Equal("asc", match.parameters["sort"])
-
-	rawRequest = httptest.NewRequest("GET", "/categories/lawn-mower/notsort", nil)
-	match = routeMatch{currentPath: rawRequest.URL.Path}
-	suite.False(route.match(rawRequest, &match))
-}
-
-func (suite *RouteTestSuite) TestAccessors() {
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		parent:  NewRouter(),
-		methods: []string{"GET", "POST"},
-	}
-
-	suite.Equal("route-name", route.GetName())
-
-	suite.Panics(func() {
-		route.Name("new-name") // Cannot re-set name
+		t.Run("already_exists", func(t *testing.T) {
+			router := prepareRouteTest()
+			route := &Route{parent: router}
+			route.Name("route-name")
+			assert.Panics(t, func() {
+				anotherRoute := &Route{parent: router}
+				anotherRoute.Name("route-name")
+			})
+		})
 	})
 
-	route = &Route{
-		name:    "",
-		uri:     "/product/{id:[0-9+]}",
-		parent:  NewRouter(),
-		methods: []string{"GET", "POST"},
-	}
-	route.Name("new-name")
-	suite.Equal("new-name", route.GetName())
+	t.Run("Meta", func(t *testing.T) {
+		router := prepareRouteTest()
+		router.Meta["parent-meta"] = "parent-value"
+		route := &Route{parent: router, Meta: make(map[string]any)}
+		route.SetMeta("meta-key", "meta-value")
+		assert.Equal(t, map[string]any{"meta-key": "meta-value"}, route.Meta)
 
-	suite.Equal("/product/{id:[0-9+]}", route.GetURI())
-	suite.Equal([]string{"GET", "POST"}, route.GetMethods())
-}
+		val, ok := route.LookupMeta("meta-key")
+		assert.Equal(t, "meta-value", val)
+		assert.True(t, ok)
 
-func (suite *RouteTestSuite) TestGetFullURIAndParameters() {
-	router := NewRouter().Subrouter("/product").Subrouter("/{id:[0-9+]}")
-	route := router.Route("GET|POST", "/{name}/accessories", func(resp *Response, r *Request) {}).Name("route-name")
+		val, ok = route.LookupMeta("parent-meta")
+		assert.Equal(t, "parent-value", val)
+		assert.True(t, ok)
 
-	uri, params := route.GetFullURIAndParameters()
-	suite.Equal("/product/{id:[0-9+]}/{name}/accessories", uri)
-	suite.Equal([]string{"id", "name"}, params)
-}
+		val, ok = route.LookupMeta("nonexistent")
+		assert.Nil(t, val)
+		assert.False(t, ok)
 
-func (suite *RouteTestSuite) TestGetFullURI() {
-	router := NewRouter().Subrouter("/product").Subrouter("/{id:[0-9+]}")
-	route := router.Route("GET|POST", "/{name}/accessories", func(resp *Response, r *Request) {}).Name("route-name")
+		route.RemoveMeta("meta-key")
+		assert.Empty(t, route.Meta)
 
-	suite.Equal("/product/{id:[0-9+]}/{name}/accessories", route.GetFullURI())
-}
-
-func (suite *RouteTestSuite) TestBuildURI() {
-	regexCache := make(map[string]*regexp.Regexp, 5)
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	suite.Equal("/product/42", route.BuildURI("42"))
-
-	suite.Panics(func() {
-		route.BuildURI()
-	})
-	suite.Panics(func() {
-		route.BuildURI("42", "more")
+		// Shouldn't panic if there is no meta (usually the case in special
+		// routes such as notFound and methodNotAllowed)
+		route.parent = nil
+		val, ok = route.LookupMeta("nonexistent")
+		assert.Nil(t, val)
+		assert.False(t, ok)
 	})
 
-	route = &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}/{name}/accessories",
-		methods: []string{"GET", "POST"},
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	suite.Equal("/product/42/screwdriver/accessories", route.BuildURI("42", "screwdriver"))
-
-	router := NewRouter().Subrouter("/product").Subrouter("/{id:[0-9+]}")
-	route = router.Route("GET|POST", "/{name}/accessories", func(resp *Response, r *Request) {}).Name("route-name")
-
-	suite.Equal("/product/42/screwdriver/accessories", route.BuildURI("42", "screwdriver"))
-}
-
-func (suite *RouteTestSuite) TestBuildURL() {
-	regexCache := make(map[string]*regexp.Regexp, 5)
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	suite.Equal("http://127.0.0.1:1235/product/42", route.BuildURL("42"))
-
-	suite.Panics(func() {
-		route.BuildURL()
-	})
-	suite.Panics(func() {
-		route.BuildURL("42", "more")
-	})
-
-	route = &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}/{name}/accessories",
-		methods: []string{"GET", "POST"},
-	}
-	route.compileParameters(route.uri, true, regexCache)
-	suite.Equal("http://127.0.0.1:1235/product/42/screwdriver/accessories", route.BuildURL("42", "screwdriver"))
-
-	router := NewRouter().Subrouter("/product").Subrouter("/{id:[0-9+]}")
-	route = router.Route("GET|POST", "/{name}/accessories", func(resp *Response, r *Request) {}).Name("route-name")
-
-	suite.Equal("http://127.0.0.1:1235/product/42/screwdriver/accessories", route.BuildURL("42", "screwdriver"))
-}
-
-func (suite *RouteTestSuite) TestValidate() {
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-	}
-	rules := &validation.Rules{
-		Fields: validation.FieldMap{
-			"field": &validation.Field{
-				Rules: []*validation.Rule{
-					{Name: "required"},
-					{Name: "string"},
-				},
+	t.Run("ValidateBody", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := &Route{
+			parent: router,
+			middlewareHolder: middlewareHolder{
+				middleware: []Middleware{},
 			},
-		},
-	}
-	route.Validate(rules)
-	suite.Equal(rules, route.validationRules)
-}
+		}
 
-func (suite *RouteTestSuite) TestMiddleware() {
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-	}
-	middelware := func(next Handler) Handler {
-		return func(response *Response, r *Request) {}
-	}
-	middelware2 := func(next Handler) Handler {
-		return func(response *Response, r *Request) {}
-	}
-	route.Middleware(middelware, middelware2)
-	suite.Len(route.middleware, 2)
-}
+		route.ValidateBody(routeTestValidationRules)
 
-func (suite *RouteTestSuite) TestGetHandler() {
-	executed := false
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-		handler: func(resp *Response, r *Request) {
-			executed = true
-		},
-	}
-	handler := route.GetHandler()
-	suite.NotNil(handler)
-	handler(nil, nil)
-	suite.True(executed)
-}
+		validationMiddleware := findMiddleware[*validateRequestMiddleware](route.middleware)
+		if !assert.NotNil(t, validationMiddleware) {
+			return
+		}
+		assert.NotNil(t, validationMiddleware.BodyRules)
+		assert.Nil(t, validationMiddleware.QueryRules)
 
-func (suite *RouteTestSuite) TestGetValidationRules() {
-	route := &Route{
-		name:    "route-name",
-		uri:     "/product/{id:[0-9+]}",
-		methods: []string{"GET", "POST"},
-	}
-	rules := &validation.Rules{
-		Fields: validation.FieldMap{
-			"email": &validation.Field{
-				Rules: []*validation.Rule{
-					{Name: "required"},
-					{Name: "string"},
-					{Name: "between", Params: []string{"3", "125"}},
-					{Name: "email"},
-				},
+		// Replace body query
+		route.ValidateBody(nil)
+		assert.Nil(t, validationMiddleware.BodyRules)
+		assert.Nil(t, validationMiddleware.QueryRules)
+	})
+
+	t.Run("ValidateQuery", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := &Route{
+			parent: router,
+			middlewareHolder: middlewareHolder{
+				middleware: []Middleware{},
 			},
-		},
-	}
-	route.Validate(rules)
+		}
 
-	suite.Same(rules, route.GetValidationRules())
-}
+		route.ValidateQuery(routeTestValidationRules)
 
-func TestRouteTestSuite(t *testing.T) {
-	RunTest(t, new(RouteTestSuite))
+		validationMiddleware := findMiddleware[*validateRequestMiddleware](route.middleware)
+		if !assert.NotNil(t, validationMiddleware) {
+			return
+		}
+		assert.NotNil(t, validationMiddleware.QueryRules)
+		assert.Nil(t, validationMiddleware.BodyRules)
+
+		// Replace query validation
+		route.ValidateQuery(nil)
+		assert.Nil(t, validationMiddleware.BodyRules)
+		assert.Nil(t, validationMiddleware.QueryRules)
+	})
+
+	t.Run("CORS", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := &Route{
+			parent:  router,
+			methods: []string{http.MethodGet},
+			Meta:    make(map[string]any),
+			middlewareHolder: middlewareHolder{
+				middleware: []Middleware{},
+			},
+		}
+
+		opts := cors.Default()
+		route.CORS(opts)
+
+		assert.Equal(t, opts, route.Meta[MetaCORS])
+		middleware := findMiddleware[*corsMiddleware](router.globalMiddleware.middleware)
+		if !assert.NotNil(t, middleware) {
+			return
+		}
+		assert.Equal(t, []string{http.MethodGet, http.MethodOptions}, route.methods)
+
+		// Disable
+		route.CORS(nil)
+		assert.Nil(t, route.Meta[MetaCORS])
+		assert.Contains(t, route.Meta, MetaCORS)
+		assert.Equal(t, []string{http.MethodGet}, route.methods)
+
+		t.Run("don't_add_middleware_if_parent_has_it_already", func(t *testing.T) {
+			router := prepareRouteTest()
+			router.CORS(cors.Default())
+			route := &Route{
+				parent:  router,
+				methods: []string{http.MethodGet},
+				Meta:    make(map[string]any),
+				middlewareHolder: middlewareHolder{
+					middleware: []Middleware{},
+				},
+			}
+			route.CORS(opts)
+			middleware := findMiddleware[*corsMiddleware](route.middleware)
+			assert.Nil(t, middleware)
+		})
+	})
+
+	t.Run("Middleware", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := &Route{
+			parent: router,
+			middlewareHolder: middlewareHolder{
+				middleware: []Middleware{},
+			},
+		}
+
+		route.Middleware(&recoveryMiddleware{}, &languageMiddleware{})
+		assert.Len(t, route.middleware, 2)
+		for _, m := range route.middleware {
+			assert.NotNil(t, m.Server())
+		}
+	})
+
+	t.Run("GetFullURIAndParameters", func(t *testing.T) {
+		router := prepareRouteTest()
+		subrouter := router.Subrouter("/product").Subrouter("/{id:[0-9+]}")
+		route := subrouter.Route([]string{http.MethodGet}, "/{name}/accessories", nil)
+
+		uri, params := route.GetFullURIAndParameters()
+		assert.Equal(t, "/product/{id:[0-9+]}/{name}/accessories", uri)
+		assert.Equal(t, []string{"id", "name"}, params)
+	})
+
+	t.Run("BuildURI", func(t *testing.T) {
+		router := prepareRouteTest()
+		subrouter := router.Subrouter("/product").Subrouter("/{id:[0-9+]}")
+		route := subrouter.Route([]string{http.MethodGet}, "/{name}/accessories", nil)
+
+		uri := route.BuildURI("123", "keyboard")
+		assert.Equal(t, "/product/123/keyboard/accessories", uri)
+
+		t.Run("invalid_param_count", func(t *testing.T) {
+			assert.Panics(t, func() {
+				route.BuildURI()
+			})
+		})
+	})
+
+	t.Run("BuildURL", func(t *testing.T) {
+		router := prepareRouteTest()
+		subrouter := router.Subrouter("/product").Subrouter("/{id:[0-9+]}")
+		route := subrouter.Route([]string{http.MethodGet}, "/{name}/accessories", nil)
+
+		uri := route.BuildURL("123", "keyboard")
+		assert.Equal(t, "http://127.0.0.1:8080/product/123/keyboard/accessories", uri)
+	})
+
+	t.Run("BuildProxyURL", func(t *testing.T) {
+		router := prepareRouteTest()
+		subrouter := router.Subrouter("/product").Subrouter("/{id:[0-9+]}")
+		route := subrouter.Route([]string{http.MethodGet}, "/{name}/accessories", nil)
+
+		uri := route.BuildProxyURL("123", "keyboard")
+		assert.Equal(t, "http://127.0.0.1:8080/product/123/keyboard/accessories", uri)
+	})
+
+	t.Run("GetFullURI", func(t *testing.T) {
+		router := prepareRouteTest()
+		subrouter := router.Subrouter("/product").Subrouter("/{id:[0-9+]}")
+		route := subrouter.Route([]string{http.MethodGet}, "/{name}/accessories", nil)
+
+		uri := route.GetFullURI()
+		assert.Equal(t, "/product/{id:[0-9+]}/{name}/accessories", uri)
+	})
+
+	t.Run("Accessors", func(t *testing.T) {
+		router := prepareRouteTest()
+		route := router.Route([]string{http.MethodGet}, "/{name}/accessories", func(_ *Response, _ *Request) {}).Name("route-name")
+		assert.Equal(t, "route-name", route.GetName())
+		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.GetMethods())
+		assert.NotNil(t, route.GetHandler())
+		assert.Equal(t, router, route.GetParent())
+		assert.Equal(t, "/{name}/accessories", route.GetURI())
+	})
+
+	t.Run("Match", func(t *testing.T) {
+
+		router := prepareRouteTest()
+		route1 := router.Route([]string{http.MethodGet, http.MethodPost}, "/product/{id:[0-9]+}", func(_ *Response, _ *Request) {})
+		route2 := router.Route([]string{http.MethodGet}, "/product/{id:[0-9]+}/{name}", func(_ *Response, _ *Request) {})
+		route3 := router.Route([]string{http.MethodGet}, "/categories/{category}/{sort:(?:asc|desc|new)}", func(_ *Response, _ *Request) {})
+		route4 := router.Route([]string{http.MethodGet}, "/product", func(_ *Response, _ *Request) {})
+
+		cases := []struct {
+			route              *Route
+			expectedParameters map[string]string
+			expectedError      error
+			method             string
+			uri                string
+			expectedResult     bool
+		}{
+			{route: route1, method: http.MethodGet, uri: "/product/33", expectedResult: true, expectedParameters: map[string]string{"id": "33"}, expectedError: nil},
+			{route: route1, method: http.MethodPost, uri: "/product/33", expectedResult: true, expectedParameters: map[string]string{"id": "33"}, expectedError: nil},
+			{route: route1, method: http.MethodPut, uri: "/product/33", expectedResult: false, expectedParameters: nil, expectedError: errMatchMethodNotAllowed},
+			{route: route1, method: http.MethodGet, uri: "/product/test", expectedResult: false, expectedParameters: nil, expectedError: errMatchNotFound},
+			{route: route2, method: http.MethodGet, uri: "/product/666/test", expectedResult: true, expectedParameters: map[string]string{"id": "666", "name": "test"}, expectedError: nil},
+			{route: route3, method: http.MethodGet, uri: "/categories/lawn-mower/asc", expectedResult: true, expectedParameters: map[string]string{"category": "lawn-mower", "sort": "asc"}, expectedError: nil},
+			{route: route3, method: http.MethodGet, uri: "/categories/lawn-mower/notasc", expectedResult: false, expectedParameters: nil, expectedError: errMatchNotFound},
+			{route: route4, method: http.MethodGet, uri: "/product", expectedResult: true, expectedParameters: nil, expectedError: nil},
+		}
+
+		for _, c := range cases {
+			c := c
+			t.Run(fmt.Sprintf("%s_%s", c.method, c.uri), func(t *testing.T) {
+				match := routeMatch{currentPath: c.uri}
+				assert.Equal(t, c.expectedResult, c.route.match(c.method, &match))
+				assert.Equal(t, c.expectedParameters, match.parameters)
+				assert.Equal(t, c.expectedError, match.err)
+			})
+		}
+
+		t.Run("err_not_overridden", func(t *testing.T) {
+			match := routeMatch{currentPath: "/product/33"}
+			route1.match(http.MethodPut, &match)
+			assert.Equal(t, errMatchMethodNotAllowed, match.err)
+
+			match.currentPath = "/product/test"
+			route1.match(http.MethodGet, &match)
+			assert.Equal(t, errMatchMethodNotAllowed, match.err)
+		})
+	})
 }

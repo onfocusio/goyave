@@ -2,29 +2,30 @@ package websocket
 
 import (
 	"context"
-	"errors"
+	stderrors "errors"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
 
-	"goyave.dev/goyave/v4/config"
-
 	ws "github.com/gorilla/websocket"
+
+	"goyave.dev/goyave/v5/util/errors"
 )
 
 // Conn represents a WebSocket connection.
 type Conn struct {
 	*ws.Conn
-	waitClose chan struct{}
-	timeout   time.Duration
-	closeOnce sync.Once
+	waitClose    chan struct{}
+	closeTimeout time.Duration
+	closeOnce    sync.Once
 }
 
-func newConn(c *ws.Conn) *Conn {
+func newConn(c *ws.Conn, closeTimeout time.Duration) *Conn {
 	conn := &Conn{
-		Conn:      c,
-		waitClose: make(chan struct{}, 1),
-		timeout:   timeout,
+		Conn:         c,
+		waitClose:    make(chan struct{}, 1),
+		closeTimeout: closeTimeout,
 	}
 	c.SetCloseHandler(conn.closeHandler)
 	return conn
@@ -33,13 +34,13 @@ func newConn(c *ws.Conn) *Conn {
 // SetCloseHandshakeTimeout set the timeout used when writing and reading
 // close frames during the close handshake.
 func (c *Conn) SetCloseHandshakeTimeout(timeout time.Duration) {
-	c.timeout = timeout
+	c.closeTimeout = timeout
 }
 
 // GetCloseHandshakeTimeout return the timeout used when writing and reading
 // close frames during the close handshake.
 func (c *Conn) GetCloseHandshakeTimeout() time.Duration {
-	return c.timeout
+	return c.closeTimeout
 }
 
 func (c *Conn) closeHandler(_ int, _ string) error {
@@ -64,19 +65,14 @@ func (c *Conn) CloseNormal() error {
 // CloseWithError performs the closing handshake as specified by
 // RFC 6455 Section 1.4 because a server error occurred.
 // Sends status code 1011 (internal server error) and
-// message "Internal server error". If debug is enabled,
-// the message is set to the given error's message.
+// message "Internal server error".
 //
 // This function starts another goroutine to read the connection,
 // expecting the close frame in response. This waiting can time out. If so,
 // Close will just close the connection. Therefore, it is not safe to call
 // this function if there is already an active reader.
-func (c *Conn) CloseWithError(err error) error {
-	message := "Internal server error"
-	if config.GetBool("app.debug") {
-		message = truncateMessage(err.Error(), maxCloseMessageLength)
-	}
-	return c.internalClose(ws.CloseInternalServerErr, message)
+func (c *Conn) CloseWithError(_ error) error {
+	return c.internalClose(ws.CloseInternalServerErr, http.StatusText(http.StatusInternalServerError))
 }
 
 // Close performs the closing handshake as specified by RFC 6455 Section 1.4.
@@ -90,16 +86,17 @@ func (c *Conn) CloseWithError(err error) error {
 func (c *Conn) Close(code int, message string) error {
 	var err error
 	c.closeOnce.Do(func() {
+		deadline := time.Now().Add(c.closeTimeout)
 		m := ws.FormatCloseMessage(code, message)
-		writeErr := c.WriteControl(ws.CloseMessage, m, time.Now().Add(c.timeout))
-		if writeErr != nil && !errors.Is(writeErr, ws.ErrCloseSent) {
+		writeErr := c.WriteControl(ws.CloseMessage, m, deadline)
+		if writeErr != nil && !stderrors.Is(writeErr, ws.ErrCloseSent) {
 			if strings.Contains(writeErr.Error(), "use of closed network connection") {
-				err = writeErr
+				err = errors.New(writeErr)
 			}
 			return
 		}
 
-		ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+		ctx, cancel := context.WithDeadline(context.Background(), deadline)
 		defer cancel()
 
 		select {
@@ -108,7 +105,7 @@ func (c *Conn) Close(code int, message string) error {
 			close(c.waitClose)
 		}
 
-		err = c.Conn.Close()
+		err = errors.New(c.Conn.Close())
 	})
 
 	return err

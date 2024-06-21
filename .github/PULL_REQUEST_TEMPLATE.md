@@ -1,23 +1,15 @@
+## References
+
+**Issue(s):** #xxx <!-- List all related issues here, use keywords if necessary: https://docs.github.com/en/issues/tracking-your-work-with-issues/linking-a-pull-request-to-an-issue#linking-a-pull-request-to-an-issue-using-a-keyword -->  
+**Discussion:** #yyy <!-- If the PR is associated with a Github discussion, reference it here --> 
+
 ## Description
 
-Make a clear and detailed description of your changes, with the added benefits.
+<!-- Make a clear and detailed description of your changes, with the added benefits and motivations. -->
 
-If your pull request is functional (new utilities or middleware for example), **include some usage examples**.
+<!-- If your pull request is functional (new utilities or middleware for example), **include some usage examples**. -->
 
 ### Possible drawbacks
 
-Describe the possible drawbacks and caveats of your changes here. If there are none, keep this section and write only `None`.
+<!-- Describe the possible drawbacks and caveats of your changes here. If there are none, you can remove this section. -->
 
-## Related issue(s)
-
-List all related issues here:
-
-* #xxx
-* #yyy
-* #zzz
-
-If your pull request is not related to any issue, keep this section and write only `None`.
-
-## Additional information
-
-If anything you need to say doesn't fit in any of the above sections, write it here. You can remove this section if it's not needed.

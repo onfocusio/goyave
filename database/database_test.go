@@ -1,227 +1,225 @@
 package database
 
 import (
-	"database/sql"
-	"os"
+	"bytes"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/suite"
-	"goyave.dev/goyave/v4/config"
-
-	"gorm.io/driver/mysql"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
-	"gorm.io/gorm/logger"
 	"gorm.io/gorm/utils/tests"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/slog"
 )
-
-type User struct {
-	Name  string `gorm:"type:varchar(100)"`
-	Email string `gorm:"type:varchar(100)"`
-	ID    uint   `gorm:"primaryKey"`
-}
-
-type DatabaseTestSuite struct {
-	suite.Suite
-	previousEnv string
-}
-
-func (suite *DatabaseTestSuite) SetupSuite() {
-	if _, ok := dialects["mysql"]; !ok {
-		RegisterDialect("mysql", "{username}:{password}@({host}:{port})/{name}?{options}", mysql.Open)
-	}
-	suite.previousEnv = os.Getenv("GOYAVE_ENV")
-	os.Setenv("GOYAVE_ENV", "test")
-	if err := config.Load(); err != nil {
-		suite.FailNow(err.Error())
-	}
-}
-
-func (suite *DatabaseTestSuite) TestBuildDSN() {
-	d := dialect{nil, "{username}:{password}@({host}:{port})/{name}?{options}"}
-	suite.Equal("goyave:secret@(127.0.0.1:3306)/goyave?charset=utf8mb4&collation=utf8mb4_general_ci&parseTime=true&loc=Local", d.buildDSN())
-}
-
-func (suite *DatabaseTestSuite) TestGetConnection() {
-	db := GetConnection()
-	suite.NotNil(db)
-	suite.NotNil(dbConnection)
-	suite.Equal(dbConnection, db)
-	suite.Nil(Close())
-	suite.Nil(dbConnection)
-
-	db = Conn()
-	suite.NotNil(db)
-	suite.Equal(dbConnection, db)
-	suite.Nil(Close())
-}
-
-func (suite *DatabaseTestSuite) TestLogLevel() {
-	db := GetConnection()
-	suite.Equal(logger.Default.LogMode(logger.Silent), db.Logger)
-	Close()
-	prev := config.Get("app.debug")
-	config.Set("app.debug", true)
-	defer config.Set("app.debug", prev)
-	db = GetConnection()
-	suite.Equal(logger.Default.LogMode(logger.Info), db.Logger)
-	Close()
-}
-
-func (suite *DatabaseTestSuite) TestGetConnectionPanic() {
-	tmpConnection := config.Get("database.connection")
-	config.Set("database.connection", "none")
-	suite.Panics(func() {
-		GetConnection()
-	})
-	config.Set("database.connection", tmpConnection)
-
-	tmpPort := config.Get("database.port")
-	config.Set("database.port", 0)
-	suite.Panics(func() {
-		GetConnection()
-	})
-	config.Set("database.port", tmpPort)
-
-	tmpConnection = config.Get("database.connection")
-	config.Set("database.connection", "notadriver")
-	suite.Panics(func() {
-		GetConnection()
-	})
-	config.Set("database.connection", tmpConnection)
-}
-
-func (suite *DatabaseTestSuite) TestModelAndMigrate() {
-	ClearRegisteredModels()
-	RegisterModel(&User{})
-	suite.Len(models, 1)
-
-	registeredModels := GetRegisteredModels()
-	suite.Len(registeredModels, 1)
-	suite.Same(models[0], registeredModels[0])
-
-	Migrate()
-	ClearRegisteredModels()
-	suite.Equal(0, len(models))
-
-	db := GetConnection()
-	defer db.Migrator().DropTable(&User{})
-
-	rows, err := db.Raw("SHOW TABLES;").Rows()
-	if err != nil {
-		panic(err)
-	}
-	defer rows.Close()
-
-	found := false
-	for rows.Next() {
-		name := ""
-		if err := rows.Scan(&name); err != nil {
-			panic(err)
-		}
-		if name == "users" {
-			found = true
-			break
-		}
-	}
-
-	suite.True(found)
-}
-
-func (suite *DatabaseTestSuite) TestInitializers() {
-	initializer := func(db *gorm.DB) {
-		db.Config.SkipDefaultTransaction = true
-	}
-	AddInitializer(initializer)
-
-	suite.Len(initializers, 1)
-
-	db := GetConnection()
-	suite.True(db.Config.SkipDefaultTransaction)
-
-	suite.Nil(Close())
-
-	AddInitializer(func(db *gorm.DB) {
-		db.Statement.Settings.Store("gorm:table_options", "ENGINE=InnoDB")
-	})
-	suite.Len(initializers, 2)
-
-	db = GetConnection()
-	suite.True(db.Config.SkipDefaultTransaction)
-	val, ok := db.Get("gorm:table_options")
-	suite.True(ok)
-	suite.Equal("ENGINE=InnoDB", val)
-
-	suite.Nil(Close())
-
-	ClearInitializers()
-	suite.Empty(initializers)
-}
-
-func (suite *DatabaseTestSuite) TestRegisterDialect() {
-	template := "{username}{username} {password} {host}:{port} {name} {options}"
-	RegisterDialect("newdialect", template, nil)
-	defer delete(dialects, "newdialect")
-
-	t, ok := dialects["newdialect"]
-	suite.True(ok)
-	suite.Equal(template, t.template)
-
-	suite.Equal("goyave{username} secret 127.0.0.1:3306 goyave charset=utf8mb4&collation=utf8mb4_general_ci&parseTime=true&loc=Local", t.buildDSN())
-
-	suite.Panics(func() {
-		RegisterDialect("newdialect", "othertemplate", nil)
-	})
-	t, ok = dialects["newdialect"]
-	suite.True(ok)
-	suite.Equal(template, t.template)
-}
 
 type DummyDialector struct {
 	tests.DummyDialector
-	DriverName string
+	DSN string
 }
 
-func (d DummyDialector) Initialize(db *gorm.DB) error {
-	pool, err := sql.Open(d.DriverName, "")
-	if err != nil {
-		return err
+func openDummy(dsn string) gorm.Dialector {
+	return &DummyDialector{
+		DSN: dsn,
 	}
-	db.ConnPool = pool
-	return d.DummyDialector.Initialize(db)
 }
 
-func (suite *DatabaseTestSuite) TestSetConnection() {
-	Close()
-	defer Close()
-	initializerOK := false
-	AddInitializer(func(db *gorm.DB) {
-		initializerOK = true
+func TestNewDatabase(t *testing.T) {
+	RegisterDialect("dummy", "host={host} port={port} user={username} dbname={name} password={password} {options}", openDummy)
+	RegisterDialect("sqlite3_test", "file:{name}?{options}", sqlite.Open)
+	t.Cleanup(func() {
+		mu.Lock()
+		delete(dialects, "dummy")
+		delete(dialects, "sqlite3_test")
+		mu.Unlock()
 	})
 
-	// No connection yet
-	db, err := SetConnection(DummyDialector{DriverName: "mysql"})
-	suite.Nil(err)
-	suite.Same(db, dbConnection)
-	suite.True(initializerOK)
+	t.Run("RegisterDialect_already_exists", func(t *testing.T) {
+		assert.Panics(t, func() {
+			RegisterDialect("dummy", "", openDummy)
+		})
+	})
 
-	// Connection replaced
-	db2, err2 := SetConnection(DummyDialector{DriverName: "mysql"})
-	suite.Nil(err2)
-	suite.Same(db2, dbConnection)
-	suite.NotSame(db, db2)
+	t.Run("New", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", true)
+		cfg.Set("database.connection", "dummy")
+		cfg.Set("database.host", "localhost")
+		cfg.Set("database.port", 5432)
+		cfg.Set("database.name", "dbname")
+		cfg.Set("database.username", "user")
+		cfg.Set("database.password", "secret")
+		cfg.Set("database.options", "option=value")
+		cfg.Set("database.maxOpenConnections", 123)
+		cfg.Set("database.maxIdleConnections", 123)
+		cfg.Set("database.maxLifetime", 123)
+		cfg.Set("database.defaultReadQueryTimeout", 123)
+		cfg.Set("database.defaultWriteQueryTimeout", 123)
+		cfg.Set("database.config.skipDefaultTransaction", true)
+		cfg.Set("database.config.dryRun", true)
+		cfg.Set("database.config.prepareStmt", false)
+		cfg.Set("database.config.disableNestedTransaction", true)
+		cfg.Set("database.config.allowGlobalUpdate", true)
+		cfg.Set("database.config.disableAutomaticPing", true)
+		cfg.Set("database.config.disableForeignKeyConstraintWhenMigrating", true)
 
-	// Open error
-	db3, err3 := SetConnection(DummyDialector{DriverName: "not a driver"})
-	suite.NotNil(err3)
-	suite.Nil(db3)
-}
+		slogger := slog.New(slog.NewHandler(true, &bytes.Buffer{}))
+		db, err := New(cfg, func() *slog.Logger { return slogger })
+		require.NoError(t, err)
+		require.NotNil(t, db)
 
-func (suite *DatabaseTestSuite) TearDownAllSuite() {
-	os.Setenv("GOYAVE_ENV", suite.previousEnv)
-}
+		if assert.NotNil(t, db.Config.Logger) {
+			// Logging is enabled when app.debug is true
+			l, ok := db.Config.Logger.(*Logger)
+			if assert.True(t, ok) {
+				assert.NotNil(t, l.slogger)
+			}
+		}
 
-func TestDatabaseTestSuite(t *testing.T) {
-	// Ensure this test is running with a working database service running
-	// in the background. Running "run_test.sh" runs a mariadb container.
-	suite.Run(t, new(DatabaseTestSuite))
+		dbConfig := db.Config
+		// Can't check log level (gorm logger unexported)
+		assert.True(t, dbConfig.SkipDefaultTransaction)
+		assert.True(t, dbConfig.DryRun)
+		assert.False(t, dbConfig.PrepareStmt)
+		assert.True(t, dbConfig.DisableNestedTransaction)
+		assert.True(t, dbConfig.AllowGlobalUpdate)
+		assert.True(t, dbConfig.DisableAutomaticPing)
+		assert.True(t, dbConfig.DisableAutomaticPing)
+
+		// Cannot check the max open conns, idle conns and lifetime
+
+		plugin, ok := db.Plugins[(&TimeoutPlugin{}).Name()]
+		if assert.True(t, ok) {
+			timeoutPlugin, ok := plugin.(*TimeoutPlugin)
+			if assert.True(t, ok) {
+				assert.Equal(t, 123*time.Millisecond, timeoutPlugin.ReadTimeout)
+				assert.Equal(t, 123*time.Millisecond, timeoutPlugin.WriteTimeout)
+			}
+		}
+
+	})
+
+	t.Run("silent", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		cfg.Set("database.connection", "dummy")
+		cfg.Set("database.host", "localhost")
+		cfg.Set("database.port", 5432)
+		cfg.Set("database.name", "dbname")
+		cfg.Set("database.username", "user")
+		cfg.Set("database.password", "secret")
+		cfg.Set("database.options", "option=value")
+		cfg.Set("database.maxOpenConnections", 123)
+		cfg.Set("database.maxIdleConnections", 123)
+		cfg.Set("database.maxLifetime", 123)
+		cfg.Set("database.defaultReadQueryTimeout", 123)
+		cfg.Set("database.defaultWriteQueryTimeout", 123)
+		cfg.Set("database.config.skipDefaultTransaction", true)
+		cfg.Set("database.config.dryRun", true)
+		cfg.Set("database.config.prepareStmt", false)
+		cfg.Set("database.config.disableNestedTransaction", true)
+		cfg.Set("database.config.allowGlobalUpdate", true)
+		cfg.Set("database.config.disableAutomaticPing", true)
+		cfg.Set("database.config.disableForeignKeyConstraintWhenMigrating", true)
+
+		logger := slog.New(slog.NewHandler(false, &bytes.Buffer{}))
+		db, err := New(cfg, func() *slog.Logger { return logger })
+		require.NoError(t, err)
+		require.NotNil(t, db)
+
+		if assert.NotNil(t, db.Config.Logger) {
+			// Logging is disable when app.debug is false
+			l, ok := db.Config.Logger.(*Logger)
+			if assert.True(t, ok) {
+				assert.Nil(t, l.slogger)
+			}
+		}
+	})
+
+	t.Run("NewFromDialector", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", true)
+		cfg.Set("database.connection", "dummy")
+		cfg.Set("database.host", "localhost")
+		cfg.Set("database.port", 5432)
+		cfg.Set("database.name", "dbname")
+		cfg.Set("database.username", "user")
+		cfg.Set("database.password", "secret")
+		cfg.Set("database.options", "option=value")
+		cfg.Set("database.maxOpenConnections", 123)
+		cfg.Set("database.maxIdleConnections", 123)
+		cfg.Set("database.maxLifetime", 123)
+		cfg.Set("database.defaultReadQueryTimeout", 123)
+		cfg.Set("database.defaultWriteQueryTimeout", 123)
+		cfg.Set("database.config.skipDefaultTransaction", true)
+		cfg.Set("database.config.dryRun", true)
+		cfg.Set("database.config.prepareStmt", false)
+		cfg.Set("database.config.disableNestedTransaction", true)
+		cfg.Set("database.config.allowGlobalUpdate", true)
+		cfg.Set("database.config.disableAutomaticPing", true)
+		cfg.Set("database.config.disableForeignKeyConstraintWhenMigrating", true)
+
+		dialector := &DummyDialector{}
+		db, err := NewFromDialector(cfg, nil, dialector)
+		require.NoError(t, err)
+		require.NotNil(t, db)
+
+		dbConfig := db.Config
+		// Can't check log level (gorm logger unexported)
+		assert.True(t, dbConfig.SkipDefaultTransaction)
+		assert.True(t, dbConfig.DryRun)
+		assert.False(t, dbConfig.PrepareStmt)
+		assert.True(t, dbConfig.DisableNestedTransaction)
+		assert.True(t, dbConfig.AllowGlobalUpdate)
+		assert.True(t, dbConfig.DisableAutomaticPing)
+		assert.True(t, dbConfig.DisableAutomaticPing)
+
+		// Cannot check the max open conns, idle conns and lifetime
+
+		plugin, ok := db.Plugins[(&TimeoutPlugin{}).Name()]
+		if assert.True(t, ok) {
+			timeoutPlugin, ok := plugin.(*TimeoutPlugin)
+			if assert.True(t, ok) {
+				assert.Equal(t, 123*time.Millisecond, timeoutPlugin.ReadTimeout)
+				assert.Equal(t, 123*time.Millisecond, timeoutPlugin.WriteTimeout)
+			}
+		}
+
+	})
+
+	t.Run("New_connection_none", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("database.connection", "none")
+		db, err := New(cfg, nil)
+		assert.Nil(t, db)
+		require.Error(t, err)
+		assert.Equal(t, "Cannot create DB connection. Database is set to \"none\" in the config", err.Error())
+	})
+
+	t.Run("New_unknown_driver", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("database.connection", "notadriver")
+		db, err := New(cfg, nil)
+		assert.Nil(t, db)
+		require.Error(t, err)
+		assert.Equal(t, "DB Connection \"notadriver\" not supported, forgotten import?", err.Error())
+	})
+
+	t.Run("SQLite_query", func(t *testing.T) {
+		cfg := config.LoadDefault()
+		cfg.Set("app.debug", false)
+		cfg.Set("database.connection", "sqlite3_test")
+		cfg.Set("database.name", "database_test.db")
+		cfg.Set("database.options", "mode=memory")
+
+		db, err := New(cfg, nil)
+		require.NoError(t, err)
+		require.NotNil(t, db)
+
+		dbNames := []string{}
+		res := db.Table("pragma_database_list").Select("name").Find(&dbNames)
+		require.NoError(t, res.Error)
+		assert.Equal(t, []string{"main"}, dbNames)
+	})
 }

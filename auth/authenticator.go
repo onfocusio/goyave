@@ -1,29 +1,45 @@
 package auth
 
 import (
+	"context"
 	"net/http"
-	"reflect"
-	"strings"
 
-	"goyave.dev/goyave/v4"
-	"goyave.dev/goyave/v4/database"
-	"goyave.dev/goyave/v4/util/sliceutil"
+	"goyave.dev/goyave/v5"
 )
 
-// Column matches a column name with a struct field.
-type Column struct {
-	Field *reflect.StructField
-	Name  string
-}
+// MetaAuth the authentication middleware will only authenticate the user
+// if this meta is present in the matched route or any of its parent and is equal to `true`.
+const MetaAuth = "goyave.require-auth"
 
-// Authenticator is an object in charge of authenticating a model.
-type Authenticator interface {
+// Authenticator is an object in charge of authenticating a client.
+//
+// The generic type should be a DTO and not be a pointer. The `request.User`
+// will use this type on successful authentication.
+type Authenticator[T any] interface {
+	goyave.Composable
 
 	// Authenticate fetch the user corresponding to the credentials
-	// found in the given request and puts the result in the given user pointer.
+	// found in the given request and returns it.
 	// If no user can be authenticated, returns the error detailing why the
 	// authentication failed. The error message is already localized.
-	Authenticate(request *goyave.Request, user interface{}) error
+	//
+	// The error returned doesn't need to be wrapped as it will only
+	// be used for the message returned in the response.
+	//
+	// If an unexpected error happens (e.g.: database error), this
+	// method should panic instead of returning an error.
+	Authenticate(request *goyave.Request) (*T, error)
+}
+
+// UserService is the dependency of authenticators used to retrieve a user by its "username".
+//
+// A username is actually any identifier (an ID, a email, a name, etc). It is the responsibility
+// of the service implementation to check the type of the "username" and either convert it or
+// return an error simulating a non-existing record (`gorm.ErrRecordNotFound`).
+//
+// If the record could not be found, the error returned should be of type `gorm.ErrRecordNotFound`.
+type UserService[T any] interface {
+	FindByUsername(ctx context.Context, username any) (*T, error)
 }
 
 // Unauthorizer can be implemented by Authenticators to define custom behavior
@@ -32,93 +48,53 @@ type Unauthorizer interface {
 	OnUnauthorized(*goyave.Response, *goyave.Request, error)
 }
 
-// Middleware create a new authenticator middleware to authenticate
-// the given model using the given authenticator.
-func Middleware(model interface{}, authenticator Authenticator) goyave.Middleware {
-	return func(next goyave.Handler) goyave.Handler {
-		return func(response *goyave.Response, r *goyave.Request) {
-			userType := reflect.Indirect(reflect.ValueOf(model)).Type()
-			user := reflect.New(userType).Interface()
-			r.User = user
-			if err := authenticator.Authenticate(r, r.User); err != nil {
-				if unauthorizer, ok := authenticator.(Unauthorizer); ok {
-					unauthorizer.OnUnauthorized(response, r, err)
-					return
-				}
-				response.JSON(http.StatusUnauthorized, map[string]string{"authError": err.Error()})
+// Handler a middleware that automatically sets the request's `User` if the
+// authenticator succeeds.
+//
+// Supports the `auth.Unauthorizer` interface.
+//
+// The T parameter represents the user DTO and should not be a pointer.
+type Handler[T any] struct {
+	Authenticator[T]
+}
+
+// Handle set the request's `User` to the user returned by the authenticator if it succeeds.
+// Blocks if the authentication is not successful.
+// If the authenticator implements `Unauthorizer`, `OnUnauthorized` is called,
+// otherwise returns a default `401 Unauthorized` error.
+// If the matched route doesn't contain the `MetaAuth` or if it's not equal to `true`,
+// the middleware is skipped.
+func (m *Handler[T]) Handle(next goyave.Handler) goyave.Handler {
+	return func(response *goyave.Response, request *goyave.Request) {
+		if requireAuth, ok := request.Route.LookupMeta(MetaAuth); !ok || requireAuth != true {
+			next(response, request)
+			return
+		}
+
+		user, err := m.Authenticator.Authenticate(request)
+		if err != nil {
+			if unauthorizer, ok := m.Authenticator.(Unauthorizer); ok {
+				unauthorizer.OnUnauthorized(response, request, err)
 				return
 			}
-			next(response, r)
+			response.JSON(http.StatusUnauthorized, map[string]string{"error": err.Error()})
+			return
 		}
+		request.User = user
+		next(response, request)
 	}
 }
 
-// FindColumns in given struct. A field matches if it has a "auth" tag with the given value.
-// Returns a slice of found fields, ordered as the input "fields" slice.
-// If the nth field is not found, the nth value of the returned slice will be nil.
+// Middleware returns an authentication middleware which will use the given
+// authenticator and set the request's `User` according to the generic type `T`, which
+// should be a DTO.
 //
-// Promoted fields are matched as well.
-//
-// Given the following struct and "username", "notatag", "password":
-//
-//	 type TestUser struct {
-//			gorm.Model
-//			Name     string `gorm:"type:varchar(100)"`
-//			Password string `gorm:"type:varchar(100)" auth:"password"`
-//			Email    string `gorm:"type:varchar(100);uniqueIndex" auth:"username"`
-//	 }
-//
-// The result will be the "Email" field, "nil" and the "Password" field.
-func FindColumns(strct interface{}, fields ...string) []*Column {
-	return findColumns(reflect.TypeOf(strct), fields)
-}
-
-func findColumns(t reflect.Type, fields []string) []*Column {
-	length := len(fields)
-	result := make([]*Column, length)
-
-	if t.Kind() == reflect.Ptr {
-		t = t.Elem()
+// This middleware should be used as a global middleware, and all routes (ou routers)
+// that require authentication should have the meta `MetaAuth` set to `true`.
+// If the matched route or any of its parent doesn't have this meta or if it's not equal to
+// `true`, the authentication is skipped.
+func Middleware[T any](authenticator Authenticator[T]) *Handler[T] {
+	return &Handler[T]{
+		Authenticator: authenticator,
 	}
-	for i := 0; i < t.NumField(); i++ {
-		strctType := t.Field(i)
-		fieldType := strctType.Type
-		if fieldType.Kind() == reflect.Ptr {
-			fieldType = fieldType.Elem()
-		}
-		if fieldType.Kind() == reflect.Struct && strctType.Anonymous {
-			// Check promoted fields recursively
-			for i, v := range findColumns(fieldType, fields) {
-				if v != nil {
-					result[i] = v
-				}
-			}
-			continue
-		}
-
-		tag := strctType.Tag.Get("auth")
-		if index := sliceutil.IndexOf(fields, tag); index != -1 {
-			result[index] = &Column{
-				Name:  columnName(strctType),
-				Field: &strctType,
-			}
-		}
-	}
-
-	return result
-}
-
-func columnName(field reflect.StructField) string {
-	for _, t := range strings.Split(field.Tag.Get("gorm"), ";") { // Check for gorm column name override
-		if strings.HasPrefix(t, "column") {
-			i := strings.Index(t, ":")
-			if i == -1 || i+1 >= len(t) {
-				// Invalid syntax, fallback to auto-naming
-				break
-			}
-			return strings.TrimSpace(t[i+1:])
-		}
-	}
-
-	return database.Conn().Config.NamingStrategy.ColumnName("", field.Name)
 }

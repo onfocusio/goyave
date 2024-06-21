@@ -1,17 +1,19 @@
 package auth
 
 import (
-	"encoding/base64"
+	"context"
 	"net/http"
-	"net/http/httptest"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
-	"goyave.dev/goyave/v4"
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/database"
+	"goyave.dev/goyave/v5"
+	"goyave.dev/goyave/v5/config"
+	"goyave.dev/goyave/v5/util/testutil"
 
-	_ "goyave.dev/goyave/v4/database/dialect/mysql"
+	_ "goyave.dev/goyave/v5/database/dialect/sqlite"
 )
 
 type TestUser struct {
@@ -21,150 +23,117 @@ type TestUser struct {
 	Email    string `gorm:"type:varchar(100);uniqueIndex" auth:"username"`
 }
 
-type TestUserPromoted struct {
-	TestUser
+type MockUserService[T any] struct {
+	user *T
+	err  error
 }
 
-type TestUserPromotedPtr struct {
-	*TestUser
-}
-
-type TestUserOverride struct {
-	gorm.Model
-	Name     string `gorm:"type:varchar(100)"`
-	Password string `gorm:"type:varchar(100);column:password_override" auth:"password"`
-	Email    string `gorm:"type:varchar(100);uniqueIndex" auth:"username"`
-}
-
-type TestUserInvalidOverride struct {
-	gorm.Model
-	Name     string `gorm:"type:varchar(100)"`
-	Password string `gorm:"type:varchar(100);column:" auth:"password"`
-	Email    string `gorm:"type:varchar(100);uniqueIndex" auth:"username"`
+func (s MockUserService[T]) FindByUsername(_ context.Context, _ any) (*T, error) {
+	return s.user, s.err
 }
 
 type TestBasicUnauthorizer struct {
-	BasicAuthenticator
+	*BasicAuthenticator[TestUser]
 }
 
 func (a *TestBasicUnauthorizer) OnUnauthorized(response *goyave.Response, _ *goyave.Request, err error) {
 	response.JSON(http.StatusUnauthorized, map[string]string{"custom error key": err.Error()})
 }
 
-type AuthenticationTestSuite struct {
-	goyave.TestSuite
-}
-
-func (suite *AuthenticationTestSuite) SetupSuite() {
-	config.Set("database.connection", "mysql")
-	database.ClearRegisteredModels()
-	database.RegisterModel(&TestUser{})
-
-	database.Migrate()
-}
-
-func (suite *AuthenticationTestSuite) SetupTest() {
+func prepareAuthenticatorTest(t *testing.T) (*testutil.TestServer, *TestUser) {
+	cfg := config.LoadDefault()
+	cfg.Set("database.connection", "sqlite3")
+	cfg.Set("database.name", "testauthenticator.db")
+	cfg.Set("database.options", "mode=memory")
+	cfg.Set("app.debug", false)
+	server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: cfg})
+	password, _ := bcrypt.GenerateFromPassword([]byte("secret"), bcrypt.DefaultCost)
 	user := &TestUser{
-		Name:     "Admin",
-		Password: "$2y$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi", // "password"
+		Name:     "johndoe",
 		Email:    "johndoe@example.org",
+		Password: string(password),
 	}
-	database.GetConnection().Create(user)
+
+	return server, user
 }
 
-func (suite *AuthenticationTestSuite) TestFindColumns() {
-	user := &TestUser{}
-	fields := FindColumns(user, "username", "password")
-	suite.Len(fields, 2)
-	suite.Equal("email", fields[0].Name)
-	suite.Equal("password", fields[1].Name)
+func TestAuthenticator(t *testing.T) {
 
-	fields = FindColumns(user, "username", "notatag", "password")
-	suite.Len(fields, 3)
-	suite.Equal("email", fields[0].Name)
-	suite.Nil(fields[1])
-	suite.Equal("password", fields[2].Name)
+	t.Run("Middleware", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		t.Cleanup(func() { server.CloseDB() })
 
-	userOverride := &TestUserOverride{}
-	fields = FindColumns(userOverride, "password")
-	suite.Len(fields, 1)
-	suite.Equal("password_override", fields[0].Name)
+		mockUserService := &MockUserService[TestUser]{user: user}
+		authenticator := Middleware(NewBasicAuthenticator(mockUserService, "Password"))
 
-	userInvalidOverride := &TestUserInvalidOverride{}
-	fields = FindColumns(userInvalidOverride, "password")
-	suite.Len(fields, 1)
-	suite.Equal("password", fields[0].Name)
-}
+		request := server.NewTestRequest(http.MethodGet, "/protected", nil)
+		request.Request().SetBasicAuth(user.Email, "secret")
+		request.Route = &goyave.Route{Meta: map[string]any{MetaAuth: true}}
+		resp := server.TestMiddleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
+			assert.Equal(t, user.ID, request.User.(*TestUser).ID)
+			assert.Equal(t, user.Name, request.User.(*TestUser).Name)
+			assert.Equal(t, user.Email, request.User.(*TestUser).Email)
+			response.Status(http.StatusOK)
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
 
-func (suite *AuthenticationTestSuite) TestFindColumnsPromoted() {
-	user := &TestUserPromoted{}
-	fields := FindColumns(user, "username", "password")
-	suite.Len(fields, 2)
-	suite.Equal("email", fields[0].Name)
-	suite.Equal("password", fields[1].Name)
-
-	fields = FindColumns(user, "username", "notatag", "password")
-	suite.Len(fields, 3)
-	suite.Equal("email", fields[0].Name)
-	suite.Nil(fields[1])
-	suite.Equal("password", fields[2].Name)
-
-	userPtr := &TestUserPromotedPtr{}
-	fields = FindColumns(userPtr, "username", "password")
-	suite.Len(fields, 2)
-	suite.Equal("email", fields[0].Name)
-	suite.Equal("password", fields[1].Name)
-}
-
-func (suite *AuthenticationTestSuite) TestAuthMiddleware() {
-	// Test middleware with BasicAuth
-	authenticator := Middleware(&TestUser{}, &BasicAuthenticator{})
-
-	request := suite.CreateTestRequest(httptest.NewRequest("GET", "/", nil))
-	request.Header().Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("johndoe@example.org:wrong_password")))
-	result := suite.Middleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
-		suite.Fail("Auth middleware passed")
+		request = server.NewTestRequest(http.MethodGet, "/protected", nil)
+		request.Request().SetBasicAuth(user.Email, "incorrect password")
+		request.Route = &goyave.Route{Meta: map[string]any{MetaAuth: true}}
+		resp = server.TestMiddleware(authenticator, request, func(response *goyave.Response, _ *goyave.Request) {
+			response.Status(http.StatusOK)
+		})
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		body, err := testutil.ReadJSONBody[map[string]string](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"error": server.Lang.GetDefault().Get("auth.invalid-credentials")}, body)
 	})
-	result.Body.Close()
-	suite.Equal(http.StatusUnauthorized, result.StatusCode)
 
-	request = suite.CreateTestRequest(httptest.NewRequest("GET", "/", nil))
-	request.Header().Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("johndoe@example.org:password")))
-	result = suite.Middleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
-		suite.IsType(&TestUser{}, request.User)
-		suite.Equal("Admin", request.User.(*TestUser).Name)
-		response.Status(200)
+	t.Run("NoAuth", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		t.Cleanup(func() { server.CloseDB() })
+
+		mockUserService := &MockUserService[TestUser]{user: user}
+		authenticator := Middleware(NewBasicAuthenticator(mockUserService, "Password"))
+
+		request := server.NewTestRequest(http.MethodGet, "/protected", nil)
+		request.Request().SetBasicAuth(user.Email, "secret")
+		request.Route = &goyave.Route{Meta: map[string]any{MetaAuth: false}}
+		resp := server.TestMiddleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
+			assert.Nil(t, request.User)
+			response.Status(http.StatusOK)
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
+
+		request.Route = &goyave.Route{Meta: map[string]any{}}
+		resp = server.TestMiddleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
+			assert.Nil(t, request.User)
+			response.Status(http.StatusOK)
+		})
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
 	})
-	result.Body.Close()
-	suite.Equal(200, result.StatusCode)
-}
 
-func (suite *AuthenticationTestSuite) TestAuthMiddlewareUnauthorizer() {
-	authenticator := Middleware(&TestUser{}, &TestBasicUnauthorizer{})
+	t.Run("MiddlewareUnauthorizer", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		t.Cleanup(func() { server.CloseDB() })
 
-	request := suite.CreateTestRequest(httptest.NewRequest("GET", "/", nil))
-	request.Header().Set("Authorization", "Basic "+base64.StdEncoding.EncodeToString([]byte("johndoe@example.org:wrong_password")))
-	result := suite.Middleware(authenticator, request, func(response *goyave.Response, request *goyave.Request) {
-		suite.Fail("Auth middleware passed")
+		mockUserService := &MockUserService[TestUser]{user: user}
+		authenticator := Middleware(&TestBasicUnauthorizer{BasicAuthenticator: NewBasicAuthenticator(mockUserService, "Password")})
+
+		request := server.NewTestRequest(http.MethodGet, "/protected", nil)
+		request.Request().SetBasicAuth(user.Email, "incorrect password")
+		request.Route = &goyave.Route{Meta: map[string]any{MetaAuth: true}}
+		resp := server.TestMiddleware(authenticator, request, func(response *goyave.Response, _ *goyave.Request) {
+			response.Status(http.StatusOK)
+		})
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		body, err := testutil.ReadJSONBody[map[string]string](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"custom error key": server.Lang.GetDefault().Get("auth.invalid-credentials")}, body)
 	})
-	defer result.Body.Close()
-
-	data := map[string]interface{}{}
-	if suite.Nil(suite.GetJSONBody(result, &data)) {
-		suite.Contains(data, "custom error key")
-	}
-	suite.Equal(http.StatusUnauthorized, result.StatusCode)
-}
-
-func (suite *AuthenticationTestSuite) TearDownTest() {
-	suite.ClearDatabase()
-}
-
-func (suite *AuthenticationTestSuite) TearDownSuite() {
-	database.Conn().Migrator().DropTable(&TestUser{})
-	database.ClearRegisteredModels()
-}
-
-func TestAuthenticationSuite(t *testing.T) {
-	goyave.RunTest(t, new(AuthenticationTestSuite))
 }

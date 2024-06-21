@@ -1,34 +1,83 @@
 package goyave
 
 import (
-	"fmt"
-	"net"
+	"context"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/imdario/mergo"
-	"goyave.dev/goyave/v4/cors"
-	"goyave.dev/goyave/v4/util/fsutil"
-
-	"github.com/google/uuid"
-	"goyave.dev/goyave/v4/validation"
+	"goyave.dev/goyave/v5/lang"
 )
 
-// Request struct represents an http request.
-// Contains the validated body in the Data attribute if the route was defined with a request generator function
+type (
+	// ExtraBodyValidationRules the key used in `Context.Extra` to
+	// store the body validation rules.
+	ExtraBodyValidationRules struct{}
+
+	// ExtraQueryValidationRules the key used in `Context.Extra` to
+	// store the query validation rules.
+	ExtraQueryValidationRules struct{}
+
+	// ExtraValidationError the key used in `Context.Extra` to
+	// store the body validation errors.
+	ExtraValidationError struct{}
+
+	// ExtraQueryValidationError the key used in `Context.Extra` to
+	// store the query validation errors.
+	ExtraQueryValidationError struct{}
+)
+
+// Request represents an http request received by the server.
 type Request struct {
 	httpRequest *http.Request
-	corsOptions *cors.Options
-	route       *Route
-	Rules       *validation.Rules
-	Params      map[string]string
-	Data        map[string]interface{}
-	Extra       map[string]interface{}
-	User        interface{}
-	Lang        string
+	Now         time.Time
+	Data        any
+	User        any
+	Query       map[string]any
+	Lang        *lang.Language
+
+	// Extra can be used to store any extra information related to the request.
+	// For example, the JWT middleware stores the token claim in the extras.
+	//
+	// The keys must be comparable and should not be of type
+	// string or any other built-in type to avoid collisions.
+	// To avoid allocating when assigning to an `interface{}`, context keys often have
+	// concrete type `struct{}`. Alternatively, exported context key variables' static
+	// type should be a pointer or interface.
+	Extra       map[any]any
+	Route       *Route
+	RouteParams map[string]string
 	cookies     []*http.Cookie
+}
+
+var requestPool = sync.Pool{
+	New: func() any {
+		return &Request{}
+	},
+}
+
+// NewRequest create a new Request from the given raw http request.
+// Initializes Now with the current time and Extra with a non-nil map.
+func NewRequest(httpRequest *http.Request) *Request {
+	req := requestPool.Get().(*Request)
+	req.reset(httpRequest)
+	return req
+}
+
+func (r *Request) reset(httpRequest *http.Request) {
+	r.httpRequest = httpRequest
+	r.Now = time.Now()
+	r.Extra = map[any]any{}
+	r.cookies = nil
+	r.Data = nil
+	r.Lang = nil
+	r.Query = nil
+	r.Route = nil
+	r.RouteParams = nil
+	r.User = nil
 }
 
 // Request return the raw http request.
@@ -47,16 +96,9 @@ func (r *Request) Protocol() string {
 	return r.httpRequest.Proto
 }
 
-// URI specifies the URI being requested.
-// Use this if you absolutely need the raw query params, url, etc.
-// Otherwise use the provided methods and fields of the "goyave.Request".
-func (r *Request) URI() *url.URL {
+// URL specifies the URL being requested.
+func (r *Request) URL() *url.URL {
 	return r.httpRequest.URL
-}
-
-// Route returns the current route.
-func (r *Request) Route() *Route {
-	return r.route
 }
 
 // Header contains the request header fields either received
@@ -130,157 +172,28 @@ func (r *Request) BearerToken() (string, bool) {
 	return strings.TrimSpace(header[len(schema):]), true
 }
 
-// CORSOptions returns the CORS options applied to this request, or nil.
-// The returned object is a copy of the options applied to the router.
-// Therefore, altering the returned object will not alter the router's options.
-func (r *Request) CORSOptions() *cors.Options {
-	if r.corsOptions == nil {
-		return nil
-	}
-
-	cpy := *r.corsOptions
-	return &cpy
+// Body the request body.
+// Always non-nil, but will return EOF immediately when no body is present.
+// The server will close the request body so handlers don't need to.
+func (r *Request) Body() io.ReadCloser {
+	return r.httpRequest.Body
 }
 
-// Has check if the given field exists in the request data.
-func (r *Request) Has(field string) bool {
-	_, exists := r.Data[field]
-	return exists
-}
-
-// String get a string field from the request data.
-// Panics if the field is not a string.
-func (r *Request) String(field string) string {
-	str, ok := r.Data[field].(string)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a string", field))
-	}
-	return str
-}
-
-// Numeric get a numeric field from the request data.
-// Panics if the field is not numeric.
-func (r *Request) Numeric(field string) float64 {
-	str, ok := r.Data[field].(float64)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not numeric", field))
-	}
-	return str
-}
-
-// Integer get an integer field from the request data.
-// Panics if the field is not an integer.
-func (r *Request) Integer(field string) int {
-	str, ok := r.Data[field].(int)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not an integer", field))
-	}
-	return str
-}
-
-// Bool get a bool field from the request data.
-// Panics if the field is not a bool.
-func (r *Request) Bool(field string) bool {
-	str, ok := r.Data[field].(bool)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a bool", field))
-	}
-	return str
-}
-
-// File get a file field from the request data.
-// Panics if the field is not numeric.
-func (r *Request) File(field string) []fsutil.File {
-	str, ok := r.Data[field].([]fsutil.File)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a file", field))
-	}
-	return str
-}
-
-// Timezone get a timezone field from the request data.
-// Panics if the field is not a timezone.
-func (r *Request) Timezone(field string) *time.Location {
-	str, ok := r.Data[field].(*time.Location)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a timezone", field))
-	}
-	return str
-}
-
-// IP get an IP field from the request data.
-// Panics if the field is not an IP.
-func (r *Request) IP(field string) net.IP {
-	str, ok := r.Data[field].(net.IP)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not an IP", field))
-	}
-	return str
-}
-
-// URL get a URL field from the request data.
-// Panics if the field is not a URL.
-func (r *Request) URL(field string) *url.URL {
-	str, ok := r.Data[field].(*url.URL)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a URL", field))
-	}
-	return str
-}
-
-// UUID get a UUID field from the request data.
-// Panics if the field is not a UUID.
-func (r *Request) UUID(field string) uuid.UUID {
-	str, ok := r.Data[field].(uuid.UUID)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not an UUID", field))
-	}
-	return str
-}
-
-// Date get a date field from the request data.
-// Panics if the field is not a date.
-func (r *Request) Date(field string) time.Time {
-	str, ok := r.Data[field].(time.Time)
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not a date", field))
-	}
-	return str
-}
-
-// Object get an object field from the request data.
-// Panics if the field is not an object.
-func (r *Request) Object(field string) map[string]interface{} {
-	str, ok := r.Data[field].(map[string]interface{})
-	if !ok {
-		panic(fmt.Sprintf("Field \"%s\" is not an object", field))
-	}
-	return str
-}
-
-// ToStruct map the request data to a struct.
+// Context returns the request's context. To change the context, use `WithContext`.
 //
-//	 type UserInsertRequest struct {
-//		 Username string
-//		 Email string
-//	 }
-//	 //...
-//	 userInsertRequest := UserInsertRequest{}
-//	 if err := request.ToStruct(&userInsertRequest); err != nil {
-//	  panic(err)
-//	 }
-func (r *Request) ToStruct(dst interface{}) error {
-	return mergo.Map(dst, r.Data)
+// The returned context is always non-nil; it defaults to the
+// background context.
+//
+// The context is canceled when the client's connection closes, the request is canceled (with HTTP/2),
+// or when the `ServeHTTP` method returns (after the finalization step of the request lifecycle).
+func (r *Request) Context() context.Context {
+	return r.httpRequest.Context()
 }
 
-func (r *Request) validate() validation.Errors {
-	if r.Rules == nil {
-		return nil
-	}
-
-	extra := map[string]interface{}{
-		"request": r,
-	}
-	contentType := r.httpRequest.Header.Get("Content-Type")
-	return validation.ValidateWithExtra(r.Data, r.Rules, strings.HasPrefix(contentType, "application/json"), r.Lang, extra)
+// WithContext creates a shallow copy of the underlying `*http.Request` with
+// its context changed to `ctx` then returns itself.
+// The provided ctx must be non-nil.
+func (r *Request) WithContext(ctx context.Context) *Request {
+	r.httpRequest = r.httpRequest.WithContext(ctx)
+	return r
 }

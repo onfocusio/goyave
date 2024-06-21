@@ -6,270 +6,227 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
-	"github.com/golang-jwt/jwt"
-	"golang.org/x/crypto/bcrypt"
-	"goyave.dev/goyave/v4"
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/database"
-	"goyave.dev/goyave/v4/validation"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"goyave.dev/goyave/v5"
+	"goyave.dev/goyave/v5/slog"
+	"goyave.dev/goyave/v5/util/testutil"
+	"goyave.dev/goyave/v5/validation"
 )
 
-const testUserPassword = "secret"
+func TestJWTController(t *testing.T) {
 
-type JWTControllerTestSuite struct {
-	user *TestUser
-	goyave.TestSuite
-}
+	t.Run("Login", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		server.Config().Set("auth.jwt.secret", "secret")
 
-func (suite *JWTControllerTestSuite) SetupSuite() {
-	config.Set("database.connection", "mysql")
-	database.ClearRegisteredModels()
-	database.RegisterModel(&TestUser{})
-
-	database.Migrate()
-}
-
-func (suite *JWTControllerTestSuite) SetupTest() {
-	password, err := bcrypt.GenerateFromPassword([]byte(testUserPassword), bcrypt.DefaultCost)
-	if err != nil {
-		panic(err)
-	}
-	suite.user = &TestUser{
-		Name:     "Admin",
-		Email:    "johndoe@example.org",
-		Password: string(password),
-	}
-	database.GetConnection().Create(suite.user)
-}
-
-func (suite *JWTControllerTestSuite) TestLogin() {
-	controller := NewJWTController(&TestUser{})
-	suite.NotNil(controller)
-
-	request := suite.CreateTestRequest(nil)
-	request.Data = map[string]interface{}{
-		"username": "johndoe@example.org",
-		"password": testUserPassword,
-	}
-	writer := httptest.NewRecorder()
-	response := suite.CreateTestResponse(writer)
-
-	controller.Login(response, request)
-	result := writer.Result()
-	suite.Equal(http.StatusOK, result.StatusCode)
-
-	json := map[string]string{}
-	err := suite.GetJSONBody(result, &json)
-	suite.Nil(err)
-
-	if err == nil {
-		token, ok := json["token"]
-		suite.True(ok)
-		suite.NotEmpty(token)
-	}
-	result.Body.Close()
-
-	request.Data = map[string]interface{}{
-		"username": "johndoe@example.org",
-		"password": "wrongpassword",
-	}
-	writer = httptest.NewRecorder()
-	response = suite.CreateTestResponse(writer)
-
-	controller.Login(response, request)
-	result = writer.Result()
-	suite.Equal(http.StatusUnauthorized, result.StatusCode)
-
-	json = map[string]string{}
-	err = suite.GetJSONBody(result, &json)
-	suite.Nil(err)
-
-	if err == nil {
-		errMessage, ok := json["validationError"]
-		suite.True(ok)
-		suite.Equal("Invalid credentials.", errMessage)
-	}
-	result.Body.Close()
-}
-
-func (suite *JWTControllerTestSuite) TestLoginWithCustomTokenFunc() {
-	controller := NewJWTController(&TestUser{})
-	suite.NotNil(controller)
-	controller.TokenFunc = func(r *goyave.Request, user interface{}) (string, error) {
-		return GenerateTokenWithClaims(jwt.MapClaims{
-			"userid": (user.(*TestUser)).Email,
-			"sub":    (user.(*TestUser)).ID,
-		}, jwt.SigningMethodHS256)
-	}
-
-	request := suite.CreateTestRequest(nil)
-	request.Data = map[string]interface{}{
-		"username": "johndoe@example.org",
-		"password": testUserPassword,
-	}
-	writer := httptest.NewRecorder()
-	response := suite.CreateTestResponse(writer)
-
-	controller.Login(response, request)
-	result := writer.Result()
-	suite.Equal(http.StatusOK, result.StatusCode)
-
-	json := map[string]string{}
-	err := suite.GetJSONBody(result, &json)
-	suite.Nil(err)
-
-	if err == nil {
-		token, ok := json["token"]
-		suite.True(ok)
-		suite.NotEmpty(token)
-		claims := jwt.MapClaims{}
-		_, err = jwt.ParseWithClaims(token, claims, func(token *jwt.Token) (interface{}, error) {
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, fmt.Errorf("Unexpected signing method: %v", token.Header["alg"])
-			}
-			return []byte(config.GetString("auth.jwt.secret")), nil
+		mockUserService := &MockUserService[TestUser]{user: user}
+		controller := NewJWTController(mockUserService, "Password")
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
 		})
-		suite.Nil(err)
 
-		userID, okID := claims["userid"]
-		suite.True(okID)
-		suite.Equal("johndoe@example.org", userID)
-		sub, okSub := claims["sub"]
-		suite.True(okSub)
-		suite.Equal(suite.user.ID, uint(sub.(float64)))
-	}
-	result.Body.Close()
-
-	request.Data = map[string]interface{}{
-		"username": "johndoe@example.org",
-		"password": "wrongpassword",
-	}
-	writer = httptest.NewRecorder()
-	response = suite.CreateTestResponse(writer)
-
-	controller.Login(response, request)
-	result = writer.Result()
-	suite.Equal(http.StatusUnauthorized, result.StatusCode)
-
-	json = map[string]string{}
-	err = suite.GetJSONBody(result, &json)
-	suite.Nil(err)
-
-	if err == nil {
-		errMessage, ok := json["validationError"]
-		suite.True(ok)
-		suite.Equal("Invalid credentials.", errMessage)
-	}
-	result.Body.Close()
-}
-
-func (suite *JWTControllerTestSuite) TestLoginTokenFuncError() {
-	controller := NewJWTController(&TestUser{})
-	suite.NotNil(controller)
-	controller.TokenFunc = func(r *goyave.Request, user interface{}) (string, error) {
-		return "", fmt.Errorf("test error")
-	}
-	request := suite.CreateTestRequest(nil)
-	request.Data = map[string]interface{}{
-		"username": "johndoe@example.org",
-		"password": testUserPassword,
-	}
-	writer := httptest.NewRecorder()
-	response := suite.CreateTestResponse(writer)
-	suite.Panics(func() {
-		controller.Login(response, request)
-	})
-}
-
-func (suite *JWTControllerTestSuite) TestLoginWithFieldOverride() {
-	controller := NewJWTController(&TestUser{})
-	controller.UsernameField = "email"
-	controller.PasswordField = "pass"
-	suite.NotNil(controller)
-
-	request := suite.CreateTestRequest(nil)
-	request.Data = map[string]interface{}{
-		"email": "johndoe@example.org",
-		"pass":  testUserPassword,
-	}
-	writer := httptest.NewRecorder()
-	response := suite.CreateTestResponse(writer)
-
-	controller.Login(response, request)
-	result := writer.Result()
-	suite.Equal(http.StatusOK, result.StatusCode)
-	result.Body.Close()
-}
-
-func (suite *JWTControllerTestSuite) TestValidation() {
-	suite.RunServer(func(router *goyave.Router) {
-		JWTRoutes(router, &TestUser{})
-	}, func() {
-		headers := map[string]string{"Content-Type": "application/json"}
-		data := map[string]interface{}{}
-		body, _ := json.Marshal(data)
-		resp, err := suite.Post("/auth/login", headers, bytes.NewReader(body))
-		suite.Nil(err)
-		if err == nil {
-			defer resp.Body.Close()
-			json := map[string]validation.Errors{}
-			err := suite.GetJSONBody(resp, &json)
-			suite.Nil(err)
-			if err == nil {
-				suite.Len(json["validationError"]["username"].Errors, 2)
-				suite.Len(json["validationError"]["password"].Errors, 2)
-			}
+		data := map[string]any{
+			"username": user.Email,
+			"password": "secret",
 		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		respBody, err := testutil.ReadJSONBody[map[string]any](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.NotEmpty(t, respBody["token"])
 	})
-}
 
-func (suite *JWTControllerTestSuite) TestLoginPanic() {
-	suite.Panics(func() {
-		request := suite.CreateTestRequest(nil)
-		request.Data = map[string]interface{}{
-			"username": "johndoe@example.org",
-			"password": testUserPassword,
-		}
-		controller := NewJWTController(&TestUserOverride{})
-		controller.Login(suite.CreateTestResponse(httptest.NewRecorder()), request)
-	})
-}
+	t.Run("Login_ptr", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		server.Config().Set("auth.jwt.secret", "secret")
 
-func (suite *JWTControllerTestSuite) TestRoutes() {
-	suite.RunServer(func(router *goyave.Router) {
-		suite.NotNil(JWTRoutes(router, &TestUser{}))
-	}, func() {
-		json, err := json.Marshal(map[string]string{
-			"username": "johndoe@example.org",
-			"password": testUserPassword,
+		mockUserService := &MockUserService[*TestUser]{user: &user}
+		controller := NewJWTController(mockUserService, "Password")
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
 		})
-		if err != nil {
-			panic(err)
-		}
 
-		headers := map[string]string{"Content-Type": "application/json"}
-		resp, err := suite.Post("/auth/login", headers, strings.NewReader(string(json)))
-		suite.Nil(err)
-		suite.NotNil(resp)
-		if resp != nil {
-			suite.Equal(200, resp.StatusCode)
-			resp.Body.Close()
+		data := map[string]any{
+			"username": user.Email,
+			"password": "secret",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		respBody, err := testutil.ReadJSONBody[map[string]any](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.NotEmpty(t, respBody["token"])
+	})
+
+	t.Run("Login_invalid", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		mockUserService := &MockUserService[TestUser]{user: user}
+		controller := NewJWTController(mockUserService, "Password")
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{
+			"username": user.Email,
+			"password": "wrong password",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+		respBody, err := testutil.ReadJSONBody[map[string]string](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, map[string]string{"error": server.Lang.GetDefault().Get("auth.invalid-credentials")}, respBody)
+	})
+
+	t.Run("Login_token_func_error", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		buf := &bytes.Buffer{}
+		server.Logger = slog.New(slog.NewHandler(false, buf))
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		mockUserService := &MockUserService[TestUser]{user: user}
+		controller := NewJWTController(mockUserService, "Password")
+		controller.TokenFunc = func(_ *goyave.Request, _ *TestUser) (string, error) {
+			return "", fmt.Errorf("test error")
+		}
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{
+			"username": user.Email,
+			"password": "secret",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
+		assert.NotEmpty(t, buf.String())
+	})
+
+	t.Run("Login_non-existing_password_field", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		buf := &bytes.Buffer{}
+		server.Logger = slog.New(slog.NewHandler(false, buf))
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		mockUserService := &MockUserService[TestUser]{user: user}
+		controller := NewJWTController(mockUserService, "NotAField")
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{
+			"username": user.Email,
+			"password": "secret",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
+		assert.NotEmpty(t, buf.String())
+	})
+
+	t.Run("Login_service_error", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		buf := &bytes.Buffer{}
+		server.Logger = slog.New(slog.NewHandler(false, buf))
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		mockUserService := &MockUserService[TestUser]{err: fmt.Errorf("service error")}
+		controller := NewJWTController(mockUserService, "NotAField")
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{
+			"username": user.Email,
+			"password": "secret",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusInternalServerError, resp.StatusCode)
+		assert.NoError(t, resp.Body.Close())
+		assert.NotEmpty(t, buf.String())
+	})
+
+	t.Run("Login_with_field_override", func(t *testing.T) {
+		server, user := prepareAuthenticatorTest(t)
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		mockUserService := &MockUserService[TestUser]{user: user}
+		controller := NewJWTController(mockUserService, "Password")
+		controller.UsernameRequestField = "email"
+		controller.PasswordRequestField = "pass"
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{
+			"email": user.Email,
+			"pass":  "secret",
+		}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		respBody, err := testutil.ReadJSONBody[map[string]any](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		assert.NotEmpty(t, respBody["token"])
+	})
+
+	t.Run("Login_validation", func(t *testing.T) {
+		server, _ := prepareAuthenticatorTest(t)
+		server.Config().Set("auth.jwt.secret", "secret")
+
+		controller := &JWTController[TestUser]{}
+		server.RegisterRoutes(func(_ *goyave.Server, router *goyave.Router) {
+			router.Controller(controller)
+		})
+
+		data := map[string]any{}
+		body, err := json.Marshal(data)
+		require.NoError(t, err)
+		request := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+		request.Header.Set("Content-Type", "application/json")
+		resp := server.TestRequest(request)
+		assert.Equal(t, http.StatusUnprocessableEntity, resp.StatusCode)
+		respBody, err := testutil.ReadJSONBody[map[string]*validation.ErrorResponse](resp.Body)
+		assert.NoError(t, resp.Body.Close())
+		require.NoError(t, err)
+		if assert.Contains(t, respBody, "error") && assert.NotNil(t, respBody["error"]) {
+			assert.Contains(t, respBody["error"].Body.Fields, "username")
+			assert.Contains(t, respBody["error"].Body.Fields, "password")
 		}
 	})
-}
-
-func (suite *JWTControllerTestSuite) TearDownTest() {
-	suite.ClearDatabase()
-}
-
-func (suite *JWTControllerTestSuite) TearDownSuite() {
-	database.Conn().Migrator().DropTable(&TestUser{})
-	database.ClearRegisteredModels()
-}
-
-func TestJWTControllerSuite(t *testing.T) {
-	goyave.RunTest(t, new(JWTControllerTestSuite))
 }

@@ -2,97 +2,72 @@ package lang
 
 import (
 	"encoding/json"
-	"fmt"
-	"os"
 	"strings"
-	"sync"
 
-	"goyave.dev/goyave/v4/config"
-	"goyave.dev/goyave/v4/util/fsutil"
-	"goyave.dev/goyave/v4/util/httputil"
+	"github.com/samber/lo"
+	"goyave.dev/goyave/v5/util/errors"
+	"goyave.dev/goyave/v5/util/fsutil"
+	"goyave.dev/goyave/v5/util/httputil"
 )
 
-type validationLines struct {
-	// Default messages for rules
-	rules map[string]string
-
-	// Attribute-specific rules messages
-	fields map[string]attribute
+// Languages container for all loaded languages.
+//
+// This structure is not protected for concurrent usage. Therefore, don't load
+// more languages when this instance is expected to receive reads.
+type Languages struct {
+	languages map[string]*Language
+	Default   string
 }
 
-type attribute struct {
-	// A custom message for when a rule doesn't pass with this attribute
-	Rules map[string]string `json:"rules"`
-
-	// The value with which the :field placeholder will be replaced
-	Name string `json:"name"`
-}
-
-// language represents a full language
-type language struct {
-	lines      map[string]string
-	validation validationLines
-}
-
-var languages map[string]language
-var mutex = &sync.RWMutex{}
-
-func (l *language) clone() language {
-	cpy := language{
-		lines: make(map[string]string, len(l.lines)),
-		validation: validationLines{
-			rules:  make(map[string]string, len(l.validation.rules)),
-			fields: make(map[string]attribute, len(l.validation.fields)),
-		},
+// New create a `Languages` with preloaded default language "en-US".
+//
+// The default language can be replaced by modifying the `Default` field
+// in the returned struct.
+func New() *Languages {
+	l := &Languages{
+		languages: make(map[string]*Language, 1),
+		Default:   enUS.name,
 	}
-
-	mergeMap(cpy.lines, l.lines)
-	mergeMap(cpy.validation.rules, l.validation.rules)
-
-	for key, attr := range l.validation.fields {
-		attrCpy := attribute{
-			Name:  attr.Name,
-			Rules: make(map[string]string, len(attr.Rules)),
-		}
-		mergeMap(attrCpy.Rules, attrCpy.Rules)
-		cpy.validation.fields[key] = attrCpy
-	}
-
-	return cpy
+	l.languages[enUS.name] = enUS.clone()
+	return l
 }
 
-// LoadDefault load the fallback language ("en-US").
-// This function is intended for internal use only.
-func LoadDefault() {
-	mutex.Lock()
-	defer mutex.Unlock()
-	languages = make(map[string]language, 1)
-	languages["en-US"] = enUS.clone()
-}
-
-// LoadAllAvailableLanguages loads every language directory
-// in the "resources/lang" directory if it exists.
-func LoadAllAvailableLanguages() {
-	mutex.Lock()
-	defer mutex.Unlock()
-	sep := string(os.PathSeparator)
-	workingDir, err := os.Getwd()
-	if err != nil {
-		panic(err)
-	}
-	langDirectory := workingDir + sep + "resources" + sep + "lang" + sep
-	if fsutil.IsDirectory(langDirectory) {
-		files, err := os.ReadDir(langDirectory)
+// LoadAllAvailableLanguages loads every available language directory.
+// If the given FS implements `fsutil.WorkingDirFS`, the directory
+// used will be "<working directory>/resources/lang".
+func (l *Languages) LoadAllAvailableLanguages(fs fsutil.FS) error {
+	langDirectory := "."
+	if wd, ok := fs.(fsutil.WorkingDirFS); ok {
+		workingDir, err := wd.Getwd()
 		if err != nil {
-			panic(err)
+			return errors.New(err)
 		}
+		langDirectory = workingDir + "/resources/lang"
+	}
+	return l.LoadDirectory(fs, langDirectory)
+}
 
-		for _, f := range files {
-			if f.IsDir() {
-				load(f.Name(), langDirectory+sep+f.Name())
+// LoadDirectory loads every language directory
+// in the given directory if it exists.
+func (l *Languages) LoadDirectory(fs fsutil.FS, directory string) error {
+	if !fsutil.IsDirectory(fs, directory) {
+		return nil
+	}
+
+	files, err := fs.ReadDir(directory)
+	if err != nil {
+		return errors.New(err)
+	}
+
+	for _, f := range files {
+		if f.IsDir() {
+			path := lo.Ternary(directory == ".", f.Name(), directory+"/"+f.Name())
+			if err := l.load(fs, f.Name(), path); err != nil {
+				return err
 			}
 		}
 	}
+	return nil
 }
 
 // Load a language directory.
@@ -100,148 +75,71 @@ func LoadAllAvailableLanguages() {
 // Directory structure of a language directory:
 //
 //	en-UK
-//	  ├─ locale.json (contains the normal language lines)
-//	  ├─ rules.json  (contains the validation messages)
-//	  └─ fields.json (contains the attribute-specific validation messages)
+//	  ├─ locale.json     (contains the normal language lines)
+//	  ├─ rules.json      (contains the validation messages)
+//	  └─ fields.json     (contains the field names)
 //
 // Each file is optional.
-func Load(language, path string) {
-	mutex.Lock()
-	defer mutex.Unlock()
-	if fsutil.IsDirectory(path) {
-		load(language, path)
-	} else {
-		panic(fmt.Sprintf("Failed loading language \"%s\", directory \"%s\" doesn't exist", language, path))
+func (l *Languages) Load(fs fsutil.FS, language, path string) error {
+	if fsutil.IsDirectory(fs, path) {
+		return l.load(fs, language, path)
 	}
+
+	return errors.Errorf("failed loading language \"%s\", directory \"%s\" doesn't exist or is not readable", language, path)
 }
 
-func load(lang string, path string) {
-	langStruct := language{}
-	sep := string(os.PathSeparator)
-	readLangFile(path+sep+"locale.json", &langStruct.lines)
-	readLangFile(path+sep+"rules.json", &langStruct.validation.rules)
-	readLangFile(path+sep+"fields.json", &langStruct.validation.fields)
+func (l *Languages) load(fs fsutil.FS, lang string, path string) error {
+	langStruct := &Language{
+		name:  lang,
+		lines: map[string]string{},
+		validation: validationLines{
+			rules:  map[string]string{},
+			fields: map[string]string{},
+		},
+	}
+	if err := readLangFile(fs, path+"/locale.json", &langStruct.lines); err != nil {
+		return err
+	}
+	if err := readLangFile(fs, path+"/rules.json", &langStruct.validation.rules); err != nil {
+		return err
+	}
+	if err := readLangFile(fs, path+"/fields.json", &langStruct.validation.fields); err != nil {
+		return err
+	}
 
-	if existingLang, exists := languages[lang]; exists {
+	if existingLang, exists := l.languages[lang]; exists {
 		mergeLang(existingLang, langStruct)
 	} else {
-		languages[lang] = langStruct
+		l.languages[lang] = langStruct
+	}
+	return nil
+}
+
+// GetLanguage returns a language by its name.
+// If the language is not available, returns a dummy language
+// that will always return the entry name.
+func (l *Languages) GetLanguage(lang string) *Language {
+	if lang, ok := l.languages[lang]; ok {
+		return lang
+	}
+	return &Language{
+		name:  "dummy",
+		lines: make(map[string]string, 0),
+		validation: validationLines{
+			rules:  make(map[string]string, 0),
+			fields: make(map[string]string, 0),
+		},
 	}
 }
 
-func readLangFile(path string, dest interface{}) {
-	if fsutil.FileExists(path) {
-		langFile, _ := os.Open(path)
-		defer langFile.Close()
-
-		errParse := json.NewDecoder(langFile).Decode(&dest)
-		if errParse != nil {
-			panic(errParse)
-		}
-	}
-}
-
-func mergeLang(dst language, src language) {
-	mergeMap(dst.lines, src.lines)
-	mergeMap(dst.validation.rules, src.validation.rules)
-
-	for key, value := range src.validation.fields {
-		if attr, exists := dst.validation.fields[key]; !exists {
-			dst.validation.fields[key] = value
-		} else {
-			attr.Name = value.Name
-			if attr.Rules == nil {
-				attr.Rules = make(map[string]string)
-			}
-			mergeMap(attr.Rules, value.Rules)
-			dst.validation.fields[key] = attr
-		}
-	}
-}
-
-func mergeMap(dst map[string]string, src map[string]string) {
-	for key, value := range src {
-		dst[key] = value
-	}
-}
-
-// Get a language line.
-//
-// For validation rules and attributes messages, use a dot-separated path:
-// - "validation.rules.<rule_name>"
-// - "validation.fields.<field_name>"
-// - "validation.fields.<field_name>.<rule_name>"
-// For normal lines, just use the name of the line. Note that if you have
-// a line called "validation", it won't conflict with the dot-separated paths.
-//
-// If not found, returns the exact "line" attribute.
-//
-// The placeholders parameter is a variadic associative slice of placeholders and their
-// replacement. In the following example, the placeholder ":username" will be replaced
-// with the Name field in the user struct.
-//
-//	lang.Get("en-US", "greetings", ":username", user.Name)
-func Get(lang string, line string, placeholders ...string) string {
-	if !IsAvailable(lang) {
-		return line
-	}
-
-	mutex.RLock()
-	defer mutex.RUnlock()
-	if strings.Count(line, ".") > 0 {
-		path := strings.Split(line, ".")
-		if path[0] == "validation" {
-			switch path[1] {
-			case "rules":
-				if len(path) < 3 {
-					return line
-				}
-				return convertEmptyLine(line, languages[lang].validation.rules[strings.Join(path[2:], ".")], placeholders)
-			case "fields":
-				length := len(path)
-				if length < 3 {
-					return line
-				}
-				attr := languages[lang].validation.fields[path[2]]
-				if length == 4 {
-					if attr.Rules == nil {
-						return line
-					}
-					return convertEmptyLine(line, attr.Rules[path[3]], placeholders)
-				} else if length == 3 {
-					return convertEmptyLine(line, attr.Name, placeholders)
-				} else {
-					return line
-				}
-			default:
-				return line
-			}
-		}
-	}
-
-	return convertEmptyLine(line, languages[lang].lines[line], placeholders)
-}
-
-func processPlaceholders(message string, values []string) string {
-	length := len(values) - 1
-	for i := 0; i < length; i += 2 {
-		message = strings.ReplaceAll(message, values[i], values[i+1])
-	}
-	return message
-}
-
-func convertEmptyLine(entry, line string, placeholders []string) string {
-	if line == "" {
-		return entry
-	}
-	return processPlaceholders(line, placeholders)
+// GetDefault is an alias for `l.GetLanguage(l.Default)`
+func (l *Languages) GetDefault() *Language {
+	return l.GetLanguage(l.Default)
 }
 
 // IsAvailable returns true if the language is available.
-func IsAvailable(lang string) bool {
-	mutex.RLock()
-	defer mutex.RUnlock()
-	_, exists := languages[lang]
+func (l *Languages) IsAvailable(lang string) bool {
+	_, exists := l.languages[lang]
 	return exists
 }
 
@@ -252,14 +150,8 @@ func IsAvailable(lang string) bool {
 //	/en/products
 //	/fr/produits
 //	...
-func GetAvailableLanguages() []string {
-	mutex.RLock()
-	defer mutex.RUnlock()
-	langs := []string{}
-	for lang := range languages {
-		langs = append(langs, lang)
-	}
-	return langs
+func (l *Languages) GetAvailableLanguages() []string {
+	return lo.Keys(l.languages)
 }
 
 // DetectLanguage detects the language to use based on the given lang string.
@@ -269,23 +161,81 @@ func GetAvailableLanguages() []string {
 // If multiple languages are given, the first available language will be used,
 // and if none are available, the default language will be used.
 // If no variant is given (for example "en"), the first available variant will be used.
-// For example, if "en-US" and "en-UK" are available and the request accepts "en",
-// "en-US" will be used.
-func DetectLanguage(lang string) string {
+func (l *Languages) DetectLanguage(lang string) *Language {
 	values := httputil.ParseMultiValuesHeader(lang)
-	for _, l := range values {
-		if l.Value == "*" { // Accept anything, so return default language
+	for _, lang := range values {
+		if lang.Value == "*" { // Accept anything, so return default language
 			break
 		}
-		if IsAvailable(l.Value) {
-			return l.Value
+		if match, ok := l.languages[lang.Value]; ok {
+			return match
 		}
-		for key := range languages {
-			if strings.HasPrefix(key, l.Value) {
-				return key
+		for key, v := range l.languages {
+			if strings.HasPrefix(key, lang.Value) {
+				// TODO priority for languages? The "first available variant" is random because keys are not ordered.
+				// Ordering alphabetically won't always produce the desired result (e.g. en-UK < en-US)
+				// Can create a slice of language names (so the order will be the order in which the languages have been added)
+				return v
 			}
 		}
 	}
 
-	return config.GetString("app.defaultLanguage")
+	return l.GetLanguage(l.Default)
+}
+
+// Get a language line.
+//
+// For validation rules messages and field names, use a dot-separated path:
+//   - "validation.rules.<rule_name>"
+//   - "validation.fields.<field_name>"
+//
+// For normal lines, just use the name of the line. Note that if you have
+// a line called "validation", it won't conflict with the dot-separated paths.
+//
+// If not found, returns the exact "line" argument.
+//
+// The placeholders parameter is a variadic associative slice of placeholders and their
+// replacement. In the following example, the placeholder ":username" will be replaced
+// with the Name field in the user struct.
+//
+//	lang.Get("en-US", "greetings", ":username", user.Name)
+func (l *Languages) Get(lang string, line string, placeholders ...string) string {
+	language, exists := l.languages[lang]
+	if !exists {
+		return line
+	}
+
+	return language.Get(line, placeholders...)
+}
+
+func readLangFile(fs fsutil.FS, path string, dest any) (err error) {
+	if !fsutil.FileExists(fs, path) {
+		return nil
+	}
+
+	langFile, _ := fs.Open(path)
+	defer func() {
+		closeErr := langFile.Close()
+		if err == nil && closeErr != nil {
+			err = errors.New(closeErr)
+		}
+	}()
+
+	err = json.NewDecoder(langFile).Decode(&dest)
+	if err != nil {
+		err = errors.Errorf("failed to load language file %s: %w", path, err)
+	}
+	return
+}
+
+func mergeLang(dst *Language, src *Language) {
+	mergeMap(dst.lines, src.lines)
+	mergeMap(dst.validation.rules, src.validation.rules)
+	mergeMap(dst.validation.fields, src.validation.fields)
+}
+
+func mergeMap(dst map[string]string, src map[string]string) {
+	for key, value := range src {
+		dst[key] = value
+	}
 }
