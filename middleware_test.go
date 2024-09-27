@@ -23,7 +23,6 @@ import (
 )
 
 func TestMiddlewareHolder(t *testing.T) {
-
 	m1 := &recoveryMiddleware{}
 	m2 := &languageMiddleware{}
 	holder := middlewareHolder{
@@ -35,7 +34,6 @@ func TestMiddlewareHolder(t *testing.T) {
 }
 
 func TestHasMiddleware(t *testing.T) {
-
 	t.Run("findMiddleware", func(t *testing.T) {
 		m := &recoveryMiddleware{}
 		holder := []Middleware{m}
@@ -224,7 +222,6 @@ func TestLanguageMiddleware(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			executed := false
 			handler := middleware.Handle(func(_ *Response, req *Request) {
@@ -258,7 +255,6 @@ func (v *testValidator) Name() string {
 }
 
 func TestValidateMiddleware(t *testing.T) {
-
 	cases := []struct {
 		next              func(*Response, *Request)
 		queryRules        func(*Request) validation.RuleSet
@@ -482,7 +478,6 @@ func TestValidateMiddleware(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			cfg := config.LoadDefault()
 			if c.hasDB {
@@ -645,7 +640,6 @@ func TestCORSMiddleware(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			middleware := &corsMiddleware{}
 			handler := middleware.Handle(func(resp *Response, _ *Request) {
@@ -664,9 +658,12 @@ func TestCORSMiddleware(t *testing.T) {
 			}
 			recorder := httptest.NewRecorder()
 			response := NewResponse(nil, request, recorder)
+			match := &routeMatch{
+				route: request.Route,
+			}
 
 			handler(response, request)
-			require.NoError(t, (&Router{}).finalize(response, request))
+			require.NoError(t, (&Router{}).finalize(match, response, request))
 			resp := recorder.Result()
 			assert.Equal(t, c.expectedStatusCode, resp.StatusCode)
 			assert.Equal(t, c.expectedHeaders, resp.Header)

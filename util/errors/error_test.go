@@ -12,9 +12,7 @@ import (
 )
 
 func TestErrors(t *testing.T) {
-
 	t.Run("toErr", func(t *testing.T) {
-
 		cases := []struct {
 			desc     string
 			reason   any
@@ -42,7 +40,6 @@ func TestErrors(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				errs := toErr(c.reason)
 				assert.Equal(t, c.expected, errs)
@@ -97,7 +94,6 @@ func TestErrors(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				err := &Error{reasons: c.reasons}
 				assert.Equal(t, c.expected, err.Error())
@@ -116,26 +112,25 @@ func TestErrors(t *testing.T) {
 			err      *Error
 			desc     string
 		}{
-			{desc: "empty_slice", err: emptySliceErr, expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:109\n")},
-			{desc: "nil_error_slice", err: New([]error{nil}).(*Error), expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:120\n")},
-			{desc: "nil_any_slice", err: New([]any{nil}).(*Error), expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:121\n")},
-			{desc: "single", err: New("err1").(*Error), expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:122\n")},
+			{desc: "empty_slice", err: emptySliceErr, expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:105\n")},
+			{desc: "nil_error_slice", err: New([]error{nil}).(*Error), expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:116\n")},
+			{desc: "nil_any_slice", err: New([]any{nil}).(*Error), expected: regexp.MustCompile("^goyave.dev/goyave/util/errors.Error: the Error doesn't wrap any reason \\(empty reasons slice\\)\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:117\n")},
+			{desc: "single", err: New("err1").(*Error), expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:118\n")},
 			{
 				desc:     "many_any",
 				err:      New([]any{fmt.Errorf("err1"), "err2", nil, map[string]any{"key": "value"}, suberror}).(*Error), // nil should be excluded
-				expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:125\n([\\d\\S\\n\\t]*?)\n\nerr2\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:125\n([\\d\\S\\n\\t]*?)\n\nmap\\[key:value\\]\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:125\n([\\d\\S\\n\\t]*?)\n\nsuberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:112\n([\\d\\S\\n\\t]*?)$"),
+				expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:121\n([\\d\\S\\n\\t]*?)\n\nerr2\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:121\n([\\d\\S\\n\\t]*?)\n\nmap\\[key:value\\]\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:121\n([\\d\\S\\n\\t]*?)\n\nsuberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:108\n([\\d\\S\\n\\t]*?)$"),
 			},
 			{
 				desc:     "many_errors",
 				err:      New([]error{fmt.Errorf("err1"), nil, suberror}).(*Error), // nil should be excluded
-				expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:130\n([\\d\\S\\n\\t]*?)\n\nsuberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:112\n([\\d\\S\\n\\t]*?)$"),
+				expected: regexp.MustCompile("^err1\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:126\n([\\d\\S\\n\\t]*?)\n\nsuberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:108\n([\\d\\S\\n\\t]*?)$"),
 			},
-			{desc: "single_already_error", err: New([]error{suberror}).(*Error), expected: regexp.MustCompile("^suberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:112\n")},
-			{desc: "contains_nil", err: &Error{reasons: []error{nil, nil}, callers: suberror.(*Error).callers}, expected: regexp.MustCompile("^<nil>\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:112\n([\\d\\S\\n\\t]*?)\n\n<nil>\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:112\n([\\d\\S\\n\\t]*?)$")}, // Should never happen but we want extra safety
+			{desc: "single_already_error", err: New([]error{suberror}).(*Error), expected: regexp.MustCompile("^suberror\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:108\n")},
+			{desc: "contains_nil", err: &Error{reasons: []error{nil, nil}, callers: suberror.(*Error).callers}, expected: regexp.MustCompile("^<nil>\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:108\n([\\d\\S\\n\\t]*?)\n\n<nil>\ngoyave\\.dev/goyave/v5/util/errors\\.TestErrors\\.func8\n\t(.*?)/goyave/util/errors/error_test\\.go:108\n([\\d\\S\\n\\t]*?)$")}, // Should never happen but we want extra safety
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				assert.Regexp(t, c.expected, c.err.String())
 			})
@@ -143,18 +138,16 @@ func TestErrors(t *testing.T) {
 	})
 
 	t.Run("FileLine", func(t *testing.T) { // Note: this test is very sensitive to line changes. If you add lines before this, be sure to also update this test.
-
 		cases := []struct {
 			err      *Error
 			expected *regexp.Regexp
 			desc     string
 		}{
-			{desc: "OK", err: New("").(*Error), expected: regexp.MustCompile("/goyave/util/errors/error_test.go:152$")},
+			{desc: "OK", err: New("").(*Error), expected: regexp.MustCompile("/goyave/util/errors/error_test.go:146$")},
 			{desc: "unknown", err: NewSkip("", 5).(*Error), expected: regexp.MustCompile(`^\[unknown file line\]$`)}, // Skip more frames than necessary to have empty callers slice
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				assert.Regexp(t, c.expected, c.err.FileLine())
 			})
@@ -183,7 +176,6 @@ func TestErrors(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				res, err := json.Marshal(c.err)
 				if c.expectedErr {

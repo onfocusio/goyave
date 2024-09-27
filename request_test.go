@@ -10,8 +10,9 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestRequest(t *testing.T) {
+type requestTestKey struct{}
 
+func TestRequest(t *testing.T) {
 	t.Run("NewRequest", func(t *testing.T) {
 		httpReq := httptest.NewRequest(http.MethodGet, "/test", nil)
 		r := NewRequest(httpReq)
@@ -84,7 +85,7 @@ func TestRequest(t *testing.T) {
 		}
 		assert.Equal(t, httpReq.Context(), ctx)
 
-		key := struct{}{}
+		key := requestTestKey{}
 		r2 := r.WithContext(context.WithValue(ctx, key, "value"))
 		assert.Equal(t, r, r2)
 

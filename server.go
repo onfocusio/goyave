@@ -450,7 +450,9 @@ func (s *Server) Start() error {
 	return nil
 }
 
-// RegisterRoutes creates a new Router for this Server and runs the given `routeRegistrer`.
+// RegisterRoutes runs the given `routeRegistrer` function with this Server and its router.
+// The router's regex cache is cleared after the `routeRegistrer` function returns.
+// This method should only be called once.
 func (s *Server) RegisterRoutes(routeRegistrer func(*Server, *Router)) {
 	routeRegistrer(s, s.router)
 	s.router.ClearRegexCache()
@@ -495,7 +497,6 @@ func (s *Server) Stop() {
 // RegisterSignalHook creates a channel listening on SIGINT and SIGTERM. When receiving such
 // signal, the server is stopped automatically and the listener on these signals is removed.
 func (s *Server) RegisterSignalHook() {
-
 	// Sometimes users may not want to have a sigChannel setup
 	// also we don't want it in tests
 	// users will have to manually call this function if they want the shutdown on signal feature

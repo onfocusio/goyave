@@ -19,9 +19,14 @@ import (
 
 type testStatusHandler struct {
 	Component
+	override Handler
 }
 
-func (*testStatusHandler) Handle(response *Response, _ *Request) {
+func (h *testStatusHandler) Handle(response *Response, request *Request) {
+	if h.override != nil {
+		h.override(response, request)
+		return
+	}
 	message := map[string]string{
 		"status": http.StatusText(response.GetStatus()),
 	}
@@ -67,7 +72,6 @@ func (c *testController) RegisterRoutes(_ *Router) {
 }
 
 func TestRouter(t *testing.T) {
-
 	t.Run("New", func(t *testing.T) {
 		router := prepareRouterTest()
 		if !assert.NotNil(t, router) {
@@ -188,7 +192,6 @@ func TestRouter(t *testing.T) {
 		assert.Nil(t, router.Meta[MetaCORS])
 		route = router.Get("/route-2", func(_ *Response, _ *Request) {})
 		assert.Equal(t, []string{http.MethodGet, http.MethodHead}, route.methods)
-
 	})
 
 	t.Run("StatusHandler", func(t *testing.T) {
@@ -349,6 +352,16 @@ func TestRouter(t *testing.T) {
 			r.Status(http.StatusOK)
 		}).Middleware(&testMiddleware{key: "route"})
 
+		statusHandlerSubrouter := router.Subrouter("/statushandler")
+		statusHandlerSubrouter.StatusHandler(&testStatusHandler{
+			override: func(response *Response, _ *Request) {
+				response.String(response.GetStatus(), "Override Bad Request")
+			},
+		}, http.StatusBadRequest)
+		statusHandlerSubrouter.Get("/", func(r *Response, _ *Request) {
+			r.Status(http.StatusBadRequest)
+		})
+
 		cases := []struct {
 			desc           string
 			requestMethod  string
@@ -426,10 +439,16 @@ func TestRouter(t *testing.T) {
 				expectedStatus: http.StatusOK,
 				expectedBody:   "",
 			},
+			{
+				desc:           "subrouter_status_handler",
+				requestMethod:  http.MethodGet,
+				requestURL:     "/statushandler",
+				expectedStatus: http.StatusBadRequest,
+				expectedBody:   "Override Bad Request",
+			},
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				recorder := httptest.NewRecorder()
 				rawRequest := httptest.NewRequest(c.requestMethod, c.requestURL, nil)
@@ -533,13 +552,11 @@ func TestRouter(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(fmt.Sprintf("%s_%s", c.method, strings.ReplaceAll(c.path, "/", "_")), func(t *testing.T) {
 				match := routeMatch{currentPath: c.path}
 				router.match(c.method, &match)
 				assert.Equal(t, c.expectedRoute, match.route.name)
 			})
 		}
-
 	})
 }

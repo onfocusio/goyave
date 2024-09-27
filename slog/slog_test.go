@@ -24,7 +24,6 @@ func (testValuerError) LogValue() slog.Value {
 }
 
 func TestLogger(t *testing.T) {
-
 	t.Run("New", func(t *testing.T) {
 		handler := NewDevModeHandler(bytes.NewBuffer(make([]byte, 0, 10)), nil)
 		l := New(handler)
@@ -62,7 +61,6 @@ func TestLogger(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				c.f(nil, pc, "message", slog.String("attr", "val"))
 
@@ -153,7 +151,6 @@ func TestLogger(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.desc, func(t *testing.T) {
 				c.f()
 				assert.Regexp(t, c.want, buf.String())
@@ -178,5 +175,13 @@ func TestLogger(t *testing.T) {
 
 		l.ErrorWithSource(context.Background(), pc, err)
 		assert.Regexp(t, r, buf.String())
+	})
+
+	t.Run("DiscardLogger", func(t *testing.T) {
+		logger := DiscardLogger()
+
+		assert.NotPanics(t, func() {
+			logger.Info("This log should be discarded")
+		})
 	})
 }

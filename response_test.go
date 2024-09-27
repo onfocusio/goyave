@@ -45,12 +45,19 @@ func (r *hijackableRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
 
 type testChainedWriter struct {
 	*httptest.ResponseRecorder
+	flushErr   error
 	prewritten []byte
 	closed     bool
+	flushed    bool
 }
 
 func (r *testChainedWriter) PreWrite(b []byte) {
 	r.prewritten = b
+}
+
+func (r *testChainedWriter) Flush() error {
+	r.flushed = true
+	return r.flushErr
 }
 
 func (r *testChainedWriter) Close() error {
@@ -58,8 +65,15 @@ func (r *testChainedWriter) Close() error {
 	return nil
 }
 
-func TestResponse(t *testing.T) {
+type testChainedWriterHTTPFlusher struct {
+	*testChainedWriter
+}
 
+func (r *testChainedWriterHTTPFlusher) Flush() {
+	r.flushed = true
+}
+
+func TestResponse(t *testing.T) {
 	t.Run("NewResponse", func(t *testing.T) {
 		resp, _ := newTestReponse()
 		assert.NotNil(t, resp.server)
@@ -238,6 +252,25 @@ func TestResponse(t *testing.T) {
 		assert.Equal(t, "hello world", string(body))
 	})
 
+	t.Run("PreWrite_called_once", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		newWriter := &testChainedWriter{
+			ResponseRecorder: recorder,
+		}
+		resp.SetWriter(newWriter)
+		_, _ = resp.Write([]byte("hello world\n"))
+		_, _ = resp.Write([]byte("how are you today?"))
+
+		res := recorder.Result()
+		body, err := io.ReadAll(res.Body)
+		assert.NoError(t, res.Body.Close())
+		require.NoError(t, err)
+		assert.Equal(t, http.StatusOK, resp.status)
+		assert.Equal(t, http.StatusOK, res.StatusCode)
+		assert.Equal(t, "hello world\nhow are you today?", string(body))
+		assert.Equal(t, "hello world\n", string(newWriter.prewritten))
+	})
+
 	t.Run("Hijack", func(t *testing.T) {
 		resp, _ := newTestReponse()
 		resp.responseWriter = &hijackableRecorder{httptest.NewRecorder()}
@@ -291,6 +324,19 @@ func TestResponse(t *testing.T) {
 		newWriter := &bytes.Buffer{}
 		resp.SetWriter(newWriter)
 		assert.Equal(t, newWriter, resp.Writer())
+	})
+
+	t.Run("SetWriter_composable", func(t *testing.T) {
+		type composableWriter struct {
+			Component
+			bytes.Buffer
+		}
+
+		resp, _ := newTestReponse()
+		newWriter := &composableWriter{}
+		resp.SetWriter(newWriter)
+		assert.Equal(t, newWriter, resp.Writer())
+		assert.Equal(t, resp.server, newWriter.server)
 	})
 
 	t.Run("Chained_writer", func(t *testing.T) {
@@ -372,7 +418,6 @@ func TestResponse(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			resp, recorder := newTestReponse()
 			logBuffer := &bytes.Buffer{}
 			resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
@@ -471,7 +516,6 @@ func TestResponse(t *testing.T) {
 	})
 
 	t.Run("WriteDBError", func(t *testing.T) {
-
 		t.Run("ErrRecordNotFound", func(t *testing.T) {
 			resp, _ := newTestReponse()
 			assert.True(t, resp.WriteDBError(fmt.Errorf("%w", gorm.ErrRecordNotFound)))
@@ -498,7 +542,92 @@ func TestResponse(t *testing.T) {
 			resp, _ := newTestReponse()
 			assert.False(t, resp.WriteDBError(nil))
 		})
-
 	})
 
+	t.Run("Flush", func(t *testing.T) {
+		resp, recorder := newTestReponse()
+		newWriter := &testChainedWriter{
+			ResponseRecorder: recorder,
+		}
+		resp.SetWriter(newWriter)
+		resp.Flush()
+		assert.True(t, newWriter.flushed)
+		assert.True(t, resp.wroteHeader)
+		assert.Equal(t, []byte{}, newWriter.prewritten) // PreWrite called
+
+		// PreWrite called once
+		newWriter.prewritten = nil
+		resp.Flush()
+		assert.Nil(t, newWriter.prewritten)
+
+		t.Run("error", func(t *testing.T) {
+			resp, recorder := newTestReponse()
+			logBuffer := &bytes.Buffer{}
+			resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+			newWriter := &testChainedWriter{
+				ResponseRecorder: recorder,
+				flushErr:         fmt.Errorf("test error"),
+			}
+			resp.SetWriter(newWriter)
+			resp.Flush()
+			assert.NotEmpty(t, logBuffer.String())
+		})
+
+		t.Run("http.Flusher", func(t *testing.T) {
+			resp, recorder := newTestReponse()
+			logBuffer := &bytes.Buffer{}
+			resp.server.Logger = slog.New(slog.NewHandler(false, logBuffer))
+			newWriter := &testChainedWriterHTTPFlusher{
+				testChainedWriter: &testChainedWriter{
+					ResponseRecorder: recorder,
+				},
+			}
+			resp.SetWriter(newWriter)
+			resp.Flush()
+			assert.True(t, newWriter.flushed)
+			assert.Empty(t, logBuffer.String())
+		})
+	})
+}
+
+type httpFlusher struct {
+	io.Writer
+	flushed bool
+}
+
+func (f *httpFlusher) Flush() {
+	f.flushed = true
+}
+
+func TestCommonWriter(t *testing.T) {
+	recorder := httptest.NewRecorder()
+	chainedWriter := &testChainedWriter{
+		ResponseRecorder: recorder,
+	}
+	wr := NewCommonWriter(chainedWriter)
+	assert.Equal(t, chainedWriter, wr.wr)
+
+	wr.PreWrite([]byte("hello"))
+	assert.Equal(t, []byte("hello"), chainedWriter.prewritten)
+
+	_, err := wr.Write([]byte("hello"))
+	assert.NoError(t, err)
+	assert.NoError(t, wr.Flush())
+	assert.True(t, chainedWriter.flushed)
+	assert.NoError(t, wr.Close())
+	assert.True(t, chainedWriter.closed)
+
+	res := chainedWriter.Result()
+	body, err := io.ReadAll(res.Body)
+	assert.NoError(t, res.Body.Close())
+	require.NoError(t, err)
+	assert.Equal(t, []byte("hello"), body)
+
+	t.Run("http.flusher_and_nocloser", func(t *testing.T) {
+		chainedWriter := &httpFlusher{}
+		wr := NewCommonWriter(chainedWriter)
+		assert.NoError(t, wr.Flush())
+		assert.True(t, chainedWriter.flushed)
+		assert.NoError(t, wr.Close())
+	})
 }

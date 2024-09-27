@@ -3,6 +3,7 @@ package compress
 import (
 	"bytes"
 	"compress/gzip"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -16,10 +17,20 @@ import (
 	"goyave.dev/goyave/v5/util/testutil"
 )
 
+type testBuf struct {
+	*bytes.Buffer
+	flushErr error
+}
+
+func (w *testBuf) Flush() error {
+	return w.flushErr
+}
+
 type closeableChildWriter struct {
 	io.Writer
 	closed     bool
 	preWritten bool
+	flushed    bool
 }
 
 func (w *closeableChildWriter) PreWrite(b []byte) {
@@ -27,6 +38,17 @@ func (w *closeableChildWriter) PreWrite(b []byte) {
 	if pr, ok := w.Writer.(goyave.PreWriter); ok {
 		pr.PreWrite(b)
 	}
+}
+
+func (w *closeableChildWriter) Flush() error {
+	w.flushed = true
+	switch flusher := w.Writer.(type) {
+	case goyave.Flusher:
+		return flusher.Flush()
+	case http.Flusher:
+		flusher.Flush()
+	}
+	return nil
 }
 
 func (w *closeableChildWriter) Close() error {
@@ -37,8 +59,21 @@ func (w *closeableChildWriter) Close() error {
 	return nil
 }
 
-func TestCompressMiddleware(t *testing.T) {
+type closeableChildWriterHTTPFlusher struct {
+	*closeableChildWriter
+}
 
+func (w *closeableChildWriterHTTPFlusher) Flush() {
+	w.flushed = true
+	switch flusher := w.Writer.(type) {
+	case goyave.Flusher:
+		_ = flusher.Flush()
+	case http.Flusher:
+		flusher.Flush()
+	}
+}
+
+func TestCompressMiddleware(t *testing.T) {
 	server := testutil.NewTestServerWithOptions(t, goyave.Options{Config: config.LoadDefault()})
 
 	handler := func(resp *goyave.Response, _ *goyave.Request) {
@@ -143,7 +178,6 @@ func TestCompressMiddleware(t *testing.T) {
 		assert.Equal(t, "application/json", result.Header.Get("Content-Type"))
 		assert.Equal(t, "{\n    \"custom-entry\": \"value\"\n}", string(body))
 	})
-
 }
 
 func TestCompressWriter(t *testing.T) {
@@ -151,26 +185,47 @@ func TestCompressWriter(t *testing.T) {
 		Level: gzip.BestCompression,
 	}
 
-	buf := bytes.NewBuffer([]byte{})
+	buf := &testBuf{Buffer: bytes.NewBuffer([]byte{})}
 	closeableWriter := &closeableChildWriter{
 		Writer: buf,
 		closed: false,
 	}
 
 	response := httptest.NewRecorder()
-
 	writer := &compressWriter{
-		WriteCloser:    encoder.NewWriter(closeableWriter),
-		ResponseWriter: response,
+		CommonWriter:   goyave.NewCommonWriter(encoder.NewWriter(closeableWriter)),
+		responseWriter: response,
 		childWriter:    closeableWriter,
 	}
 
 	writer.PreWrite([]byte("hello world"))
-
 	assert.True(t, closeableWriter.preWritten)
+
+	assert.NoError(t, writer.Flush())
+	assert.True(t, closeableWriter.flushed)
+
+	buf.flushErr = fmt.Errorf("test error")
+	assert.ErrorIs(t, writer.Flush(), buf.flushErr)
 
 	require.NoError(t, writer.Close())
 	assert.True(t, closeableWriter.closed)
+
+	t.Run("http_flusher", func(t *testing.T) {
+		buf := &testBuf{Buffer: bytes.NewBuffer([]byte{})}
+		closeableWriter := &closeableChildWriterHTTPFlusher{
+			closeableChildWriter: &closeableChildWriter{
+				Writer: buf,
+			},
+		}
+		response := httptest.NewRecorder()
+		writer := &compressWriter{
+			CommonWriter:   goyave.NewCommonWriter(encoder.NewWriter(closeableWriter)),
+			responseWriter: response,
+			childWriter:    closeableWriter,
+		}
+		assert.NoError(t, writer.Flush())
+		assert.True(t, closeableWriter.flushed)
+	})
 }
 
 type testEncoder struct {
@@ -186,7 +241,6 @@ func (e *testEncoder) Encoding() string {
 }
 
 func TestEncoderPriority(t *testing.T) {
-
 	gzip := &testEncoder{encoding: "gzip"}
 	br := &testEncoder{encoding: "br"}
 	zstd := &testEncoder{encoding: "zstd"}
@@ -259,7 +313,6 @@ func TestEncoderPriority(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.acceptEncoding, func(t *testing.T) {
 			middleware := &Middleware{
 				Encoders: c.encoders,

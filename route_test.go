@@ -28,7 +28,6 @@ func routeTestValidationRules(_ *Request) validation.RuleSet {
 }
 
 func TestRoute(t *testing.T) {
-
 	t.Run("Name", func(t *testing.T) {
 		router := prepareRouteTest()
 		route := &Route{parent: router}
@@ -256,7 +255,6 @@ func TestRoute(t *testing.T) {
 	})
 
 	t.Run("Match", func(t *testing.T) {
-
 		router := prepareRouteTest()
 		route1 := router.Route([]string{http.MethodGet, http.MethodPost}, "/product/{id:[0-9]+}", func(_ *Response, _ *Request) {})
 		route2 := router.Route([]string{http.MethodGet}, "/product/{id:[0-9]+}/{name}", func(_ *Response, _ *Request) {})
@@ -282,7 +280,6 @@ func TestRoute(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(fmt.Sprintf("%s_%s", c.method, c.uri), func(t *testing.T) {
 				match := routeMatch{currentPath: c.uri}
 				assert.Equal(t, c.expectedResult, c.route.match(c.method, &match))

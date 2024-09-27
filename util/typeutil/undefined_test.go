@@ -92,7 +92,6 @@ func TestUndefined(t *testing.T) {
 	})
 
 	t.Run("Value", func(t *testing.T) {
-
 		cases := []struct {
 			undefined driver.Valuer
 			want      driver.Value
@@ -108,7 +107,6 @@ func TestUndefined(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			v, err := c.undefined.Value()
 			assert.Equal(t, c.want, v)
 			if c.wantErr {
@@ -117,7 +115,6 @@ func TestUndefined(t *testing.T) {
 				require.NoError(t, err)
 			}
 		}
-
 	})
 
 	t.Run("CopyValue", func(t *testing.T) {
@@ -131,7 +128,6 @@ func TestUndefined(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			assert.Equal(t, c.want, c.undefined.CopyValue())
 		}
 	})
@@ -153,7 +149,6 @@ func TestUndefined(t *testing.T) {
 		}
 
 		for _, c := range cases {
-			c := c
 			err := c.undefined.Scan(c.value)
 			if c.wantErr != nil {
 				require.ErrorContains(t, err, c.wantErr.Error())

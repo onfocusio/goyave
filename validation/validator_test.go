@@ -110,7 +110,6 @@ func TestGetFieldName(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			assert.Equal(t, c.want, GetFieldName(language, c.path))
 		})
@@ -140,7 +139,6 @@ func TestGetFieldType(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			assert.Equal(t, c.want, GetFieldType(c.value))
 		})
@@ -303,6 +301,61 @@ func TestValidate(t *testing.T) {
 				},
 			},
 			wantData: []string{"a", "b", "c"},
+		},
+		{
+			desc: "root_object_array",
+			options: &Options{
+				Data:     []any{map[string]any{"value": "a"}, map[string]any{"value": "b"}},
+				Language: lang.New().GetDefault(),
+				Rules: RuleSet{
+					{Path: CurrentElement, Rules: List{Required(), Array()}},
+					{Path: "[]", Rules: List{Object()}},
+					{Path: "[].value", Rules: List{Required(), String()}},
+				},
+			},
+			wantData: []map[string]any{{"value": "a"}, {"value": "b"}},
+		},
+		{
+			desc: "root_object_array_with_error",
+			options: &Options{
+				Data:     []any{map[string]any{"value": "a"}, map[string]any{"value": "b"}, "c"},
+				Language: lang.New().GetDefault(),
+				Rules: RuleSet{
+					{Path: CurrentElement, Rules: List{Required(), Array()}},
+					{Path: "[]", Rules: List{Object()}},
+					{Path: "[].value", Rules: List{Required(), String()}},
+				},
+			},
+			wantValidationErrors: &Errors{
+				Elements: ArrayErrors{
+					2: &Errors{
+						Errors: []string{"The body elements must be objects."},
+					},
+				},
+			},
+		},
+		{
+			desc: "root_object_array_with_deep_error",
+			options: &Options{
+				Data:     []any{map[string]any{"value": "a"}},
+				Language: lang.New().GetDefault(),
+				Rules: RuleSet{
+					{Path: CurrentElement, Rules: List{Required(), Array()}},
+					{Path: "[]", Rules: List{Object()}},
+					{Path: "[].value", Rules: List{Required(), Object()}},
+				},
+			},
+			wantValidationErrors: &Errors{
+				Elements: ArrayErrors{
+					0: &Errors{
+						Fields: FieldsErrors{
+							"value": &Errors{
+								Errors: []string{"The value must be an object."},
+							},
+						},
+					},
+				},
+			},
 		},
 		{
 			desc: "root_n_array",
@@ -835,10 +888,26 @@ func TestValidate(t *testing.T) {
 				},
 			},
 		},
+		{
+			desc: "no_language_provided_in_options",
+			options: &Options{
+				Data: map[string]any{"property": nil},
+				Rules: RuleSet{
+					{Path: "property", Rules: List{Required()}},
+				},
+			},
+			wantValidationErrors: &Errors{
+				Fields: FieldsErrors{
+					"property": &Errors{
+						Errors: []string{"The property is required."}, // Translated message (using lang.Default)
+					},
+				},
+			},
+			wantData: map[string]any{},
+		},
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			validationErrors, errs := Validate(c.options)
 			assert.Equal(t, c.wantValidationErrors, validationErrors)

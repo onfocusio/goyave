@@ -119,15 +119,19 @@ func NewRouter(server *Server) *Router {
 		Meta:       make(map[string]any),
 	}
 	router.StatusHandler(&PanicStatusHandler{}, http.StatusInternalServerError)
-	for i := 400; i <= 418; i++ {
+	for i := http.StatusBadRequest; i <= http.StatusTeapot; i++ {
 		router.StatusHandler(&ErrorStatusHandler{}, i)
 	}
+	router.StatusHandler(&ParseErrorStatusHandler{}, http.StatusBadRequest)
 	router.StatusHandler(&ValidationStatusHandler{}, http.StatusUnprocessableEntity)
-	for i := 423; i <= 426; i++ {
+	for i := http.StatusLocked; i <= http.StatusUpgradeRequired; i++ {
 		router.StatusHandler(&ErrorStatusHandler{}, i)
 	}
-	router.StatusHandler(&ErrorStatusHandler{}, 421, 428, 429, 431, 444, 451)
-	router.StatusHandler(&ErrorStatusHandler{}, 501, 502, 503, 504, 505, 506, 507, 508, 510, 511)
+	router.StatusHandler(&ErrorStatusHandler{}, http.StatusMisdirectedRequest, http.StatusPreconditionRequired, http.StatusTooManyRequests, http.StatusRequestHeaderFieldsTooLarge, 444, http.StatusUnavailableForLegalReasons) // 444 is a nginx status code. Indicates server to return no information to the client and close the connection immediately
+	for i := http.StatusNotImplemented; i <= http.StatusLoopDetected; i++ {
+		router.StatusHandler(&ErrorStatusHandler{}, i)
+	}
+	router.StatusHandler(&ErrorStatusHandler{}, http.StatusNotExtended, http.StatusNetworkAuthenticationRequired)
 	router.GlobalMiddleware(&recoveryMiddleware{}, &languageMiddleware{})
 	return router
 }
@@ -506,7 +510,7 @@ func (r *Router) requestHandler(match *routeMatch, w http.ResponseWriter, rawReq
 
 	handler(response, request)
 
-	if err := r.finalize(response, request); err != nil {
+	if err := r.finalize(match, response, request); err != nil {
 		r.server.Logger.Error(err)
 	}
 
@@ -515,13 +519,13 @@ func (r *Router) requestHandler(match *routeMatch, w http.ResponseWriter, rawReq
 }
 
 // finalize the request's life-cycle.
-func (r *Router) finalize(response *Response, request *Request) error {
+func (r *Router) finalize(match *routeMatch, response *Response, request *Request) error {
 	if response.empty {
 		if response.status == 0 {
 			// If the response is empty, return status 204 to
 			// comply with RFC 7231, 6.3.5
 			response.Status(http.StatusNoContent)
-		} else if statusHandler, ok := r.statusHandlers[response.status]; ok {
+		} else if statusHandler, ok := r.getStatusHandler(match, response.status); ok {
 			// Status has been set but body is empty.
 			// Execute status handler if exists.
 			statusHandler.Handle(response, request)
@@ -533,4 +537,13 @@ func (r *Router) finalize(response *Response, request *Request) error {
 	}
 
 	return errorutil.New(response.close())
+}
+
+func (r *Router) getStatusHandler(match *routeMatch, status int) (StatusHandler, bool) {
+	if match.route.parent == nil {
+		h, ok := r.statusHandlers[status]
+		return h, ok
+	}
+	h, ok := match.route.parent.statusHandlers[status]
+	return h, ok
 }

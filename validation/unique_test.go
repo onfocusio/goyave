@@ -6,6 +6,7 @@ import (
 
 	"github.com/samber/lo"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
@@ -114,7 +115,6 @@ func TestUniqueValidator(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			opts := prepareUniqueTest(t)
 			if len(c.records) > 0 {
@@ -136,7 +136,6 @@ func TestUniqueValidator(t *testing.T) {
 			assert.Equal(t, c.expectedErrors, lo.Map(ctx.errors, func(e error, _ int) string { return e.Error() }))
 		})
 	}
-
 }
 
 func TestExistsValidator(t *testing.T) {
@@ -205,7 +204,6 @@ func TestExistsValidator(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			opts := prepareUniqueTest(t)
 			if len(c.records) > 0 {
@@ -340,7 +338,6 @@ func TestUniqueArrayValidator(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			opts := prepareUniqueTest(t)
 			if len(c.records) > 0 {
@@ -363,7 +360,6 @@ func TestUniqueArrayValidator(t *testing.T) {
 	}
 
 	t.Run("buildQuery", func(t *testing.T) {
-
 		cases := []struct {
 			dialect  string
 			expected string
@@ -372,17 +368,17 @@ func TestUniqueArrayValidator(t *testing.T) {
 			{dialect: "mysql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES ROW(2,0),ROW(7,1),ROW(6,2)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS NOT NULL"},
 			{dialect: "postgres", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (2,0::int),(7,1::int),(6,2::int)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS NOT NULL"},
 			{dialect: "mssql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (2,0),(7,1),(6,2)) t(id,i)) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS NOT NULL"},
+			{dialect: "clickhouse", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES 'id Int64, i Int64', (2,0),(7,1),(6,2))) SELECT i FROM ctx_values INNER JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS NOT NULL"},
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.dialect, func(t *testing.T) {
 				opts := prepareUniqueTest(t)
 				opts.Config.Set("database.connection", c.dialect)
 				v := UniqueArray[int]("models", "name", nil)
 				v.init(opts)
 
-				tx := v.buildQuery([]int{2, 7, 6}, false)
+				tx, _ := v.buildQuery([]int{2, 7, 6}, false)
 
 				sql := tx.ToSQL(func(tx *gorm.DB) *gorm.DB {
 					return tx
@@ -504,7 +500,6 @@ func TestExistsArrayValidator(t *testing.T) {
 	}
 
 	for _, c := range cases {
-		c := c
 		t.Run(c.desc, func(t *testing.T) {
 			opts := prepareUniqueTest(t)
 			if len(c.records) > 0 {
@@ -527,7 +522,6 @@ func TestExistsArrayValidator(t *testing.T) {
 	}
 
 	t.Run("buildQuery", func(t *testing.T) {
-
 		cases := []struct {
 			dialect  string
 			expected string
@@ -536,17 +530,17 @@ func TestExistsArrayValidator(t *testing.T) {
 			{dialect: "mysql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES ROW(2,0),ROW(7,1),ROW(6,2)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
 			{dialect: "postgres", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (2,0::int),(7,1::int),(6,2::int)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
 			{dialect: "mssql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (2,0),(7,1),(6,2)) t(id,i)) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+			{dialect: "clickhouse", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES 'id Int64, i Int64', (2,0),(7,1),(6,2))) SELECT i FROM ctx_values INNER JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
 		}
 
 		for _, c := range cases {
-			c := c
 			t.Run(c.dialect, func(t *testing.T) {
 				opts := prepareUniqueTest(t)
 				opts.Config.Set("database.connection", c.dialect)
 				v := ExistsArray[int]("models", "name", nil)
 				v.init(opts)
 
-				tx := v.buildQuery([]int{2, 7, 6}, true)
+				tx, _ := v.buildQuery([]int{2, 7, 6}, true)
 
 				sql := tx.ToSQL(func(tx *gorm.DB) *gorm.DB {
 					return tx
@@ -555,4 +549,52 @@ func TestExistsArrayValidator(t *testing.T) {
 			})
 		}
 	})
+}
+
+func TestBuildQueryValidatorWithTransform(t *testing.T) {
+	t.Run("buildQuery", func(t *testing.T) {
+		cases := []struct {
+			dialect  string
+			expected string
+		}{
+			{dialect: "sqlite3", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (1,0),(6,1),(5,2)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+			{dialect: "mysql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES ROW(1,0),ROW(6,1),ROW(5,2)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+			{dialect: "postgres", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (1,0::int),(6,1::int),(5,2::int)) t) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+			{dialect: "mssql", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES (1,0),(6,1),(5,2)) t(id,i)) SELECT i FROM ctx_values LEFT JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+			{dialect: "clickhouse", expected: "WITH ctx_values(id, i) AS (SELECT * FROM (VALUES 'id Int64, i Int64', (1,0),(6,1),(5,2))) SELECT i FROM ctx_values INNER JOIN `models` ON `models`.`name` = ctx_values.id WHERE `models`.`name` IS  NULL"},
+		}
+
+		for _, c := range cases {
+			t.Run(c.dialect, func(t *testing.T) {
+				opts := prepareUniqueTest(t)
+				opts.Config.Set("database.connection", c.dialect)
+				transform := func(val int) clause.Expr {
+					return gorm.Expr("?", val-1)
+				}
+				v := ExistsArray[int]("models", "name", transform)
+				v.init(opts)
+
+				tx, _ := v.buildQuery([]int{2, 7, 6}, true)
+
+				sql := tx.ToSQL(func(tx *gorm.DB) *gorm.DB {
+					return tx
+				})
+				assert.Equal(t, c.expected, sql)
+			})
+		}
+	})
+}
+
+func TestClickhouseUnsupportedType(t *testing.T) {
+	opts := prepareUniqueTest(t)
+	opts.Config.Set("database.connection", "clickhouse")
+	v := ExistsArray[struct{}]("models", "name", nil)
+	v.init(opts)
+
+	ctx := &Context{
+		Value: []struct{}{{}, {}},
+	}
+	v.validate(ctx, true)
+	require.Len(t, ctx.errors, 1)
+	assert.Equal(t, "ExistsArray/UniqueArray validator: value of type T (struct {}) is not supported for Clickhouse. You must provide a Transform function", ctx.errors[0].Error())
 }
